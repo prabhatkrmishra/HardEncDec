@@ -8,19 +8,21 @@
 #include <memory>
 #include <stdexcept>
 #include <conio.h>
+#include <cstring>
 
+const int PBKDF2_ITERATIONS = 400000;
+const size_t BUFFER_SIZE = 4096;
 const int AES_KEYLEN = 32;
 const int AES_IVLEN = 12;
 const int SALT_SIZE = 16;
 const int TAG_SIZE = 16;
-const int PBKDF2_ITERATIONS = 200000;
-const size_t BUFFER_SIZE = 4096;
+uint8_t version = 1;
 
 static void handleErrors(const std::string& msg) {
 	std::cerr << "Error: " << msg << std::endl;
 }
 
-std::vector<unsigned char> deriveKey(const std::string& password, const std::vector<unsigned char>& salt) {
+static std::vector<unsigned char> deriveKey(const std::string& password, const std::vector<unsigned char>& salt) {
 	std::vector<unsigned char> key(AES_KEYLEN);
 	if (!PKCS5_PBKDF2_HMAC(password.c_str(), password.length(), salt.data(), salt.size(), PBKDF2_ITERATIONS, EVP_sha256(), key.size(), key.data())) {
 		throw std::runtime_error("Key derivation failed");
@@ -30,14 +32,14 @@ std::vector<unsigned char> deriveKey(const std::string& password, const std::vec
 
 static std::string getPassword() {
 	std::string password;
-	std::cout << "Enter password: ";
+	std::cout << "Enter password for Enc/Dec: ";
 	char ch;
 	while ((ch = _getch()) != '\r') {
-		if (ch == '\b' && !password.empty()) {
+		if (ch == 8 && !password.empty()) {
 			password.pop_back();
 			std::cout << "\b \b";
 		}
-		else if (ch != '\b') {
+		else if (ch != 8) {
 			password.push_back(ch);
 			std::cout << '*';
 		}
@@ -46,7 +48,7 @@ static std::string getPassword() {
 	return password;
 }
 
-std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> createCipherContext(const EVP_CIPHER* cipher, const unsigned char* key, const unsigned char* iv, int encrypt) {
+static std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> createCipherContext(const EVP_CIPHER* cipher, const unsigned char* key, const unsigned char* iv, int encrypt) {
 	std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
 	if (!ctx || !EVP_CipherInit_ex(ctx.get(), cipher, nullptr, key, iv, encrypt)) {
 		throw std::runtime_error("Cipher context initialization failed");
@@ -56,25 +58,28 @@ std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> createCipherCont
 
 static void aesEncryptFile(const std::string& inputFilename, const std::string& outputFilename, const std::string& password) {
 	std::ifstream inputFile(inputFilename, std::ios::binary);
-	std::ofstream outputFile(outputFilename, std::ios::binary);
-
 	if (!inputFile) throw std::runtime_error("Could not open input file");
+
+	std::ofstream outputFile(outputFilename, std::ios::binary);
 	if (!outputFile) throw std::runtime_error("Could not open output file");
 
+	outputFile.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
 	std::vector<unsigned char> salt(SALT_SIZE);
-	RAND_bytes(salt.data(), SALT_SIZE);
-	std::vector<unsigned char> key = deriveKey(password, salt);
 	std::vector<unsigned char> iv(AES_IVLEN);
-	RAND_bytes(iv.data(), AES_IVLEN);
+	if (!RAND_bytes(salt.data(), SALT_SIZE) || !RAND_bytes(iv.data(), AES_IVLEN)) {
+		throw std::runtime_error("Random number generation failed");
+	}
 
 	outputFile.write(reinterpret_cast<const char*>(salt.data()), SALT_SIZE);
 	outputFile.write(reinterpret_cast<const char*>(iv.data()), AES_IVLEN);
 
+	std::vector<unsigned char> key = deriveKey(password, salt);
 	auto ctx = createCipherContext(EVP_aes_256_gcm(), key.data(), iv.data(), 1);
 
 	std::vector<unsigned char> buffer(BUFFER_SIZE);
 	std::vector<unsigned char> encryptedBuffer(BUFFER_SIZE + TAG_SIZE);
-	int len, encryptedLen;
+	int len;
 
 	while (inputFile.read(reinterpret_cast<char*>(buffer.data()), BUFFER_SIZE)) {
 		if (!EVP_CipherUpdate(ctx.get(), encryptedBuffer.data(), &len, buffer.data(), inputFile.gcount())) {
@@ -87,7 +92,7 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
 		//if final fails, the tag is invalid.
 		throw std::runtime_error("Encryption finalization failed");
 	}
-	encryptedLen = len;
+	outputFile.write(reinterpret_cast<const char*>(encryptedBuffer.data()), len);
 
 	unsigned char tag[TAG_SIZE];
 	if (!EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, TAG_SIZE, tag)) {
@@ -96,19 +101,26 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
 	outputFile.write(reinterpret_cast<const char*>(tag), TAG_SIZE);
 
 	OPENSSL_cleanse(key.data(), key.size());
+	OPENSSL_cleanse(buffer.data(), buffer.size());
+
+	std::cout << "Encryption successful!" << std::endl;
 }
 
 static void aesDecryptFile(const std::string& inputFilename, const std::string& outputFilename, const std::string& password) {
 	std::ifstream inputFile(inputFilename, std::ios::binary | std::ios::ate);
-
 	if (!inputFile) throw std::runtime_error("Could not open input file");
 
 	std::streamsize fileSize = inputFile.tellg();
-	if (fileSize < SALT_SIZE + AES_IVLEN + TAG_SIZE) {
-		throw std::runtime_error("Invalid file format");
+	inputFile.seekg(0, std::ios::beg);
+
+	if (fileSize < sizeof(uint8_t) + SALT_SIZE + AES_IVLEN + TAG_SIZE) {
+		throw std::runtime_error("Invalid or corrupted encrypted file");
 	}
 
-	inputFile.seekg(0, std::ios::beg);
+	inputFile.read(reinterpret_cast<char*>(&version), sizeof(version));
+	if (version != 1) {
+		throw std::runtime_error("Unsupported encryption version");
+	}
 
 	std::vector<unsigned char> salt(SALT_SIZE);
 	std::vector<unsigned char> iv(AES_IVLEN);
@@ -118,16 +130,11 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 	inputFile.read(reinterpret_cast<char*>(iv.data()), AES_IVLEN);
 
 	std::vector<unsigned char> key = deriveKey(password, salt);
-
 	auto ctx = createCipherContext(EVP_aes_256_gcm(), key.data(), iv.data(), 0);
 
-	// Calculate ciphertext size
-	std::streamsize ciphertextSize = fileSize - SALT_SIZE - AES_IVLEN - TAG_SIZE;
-
-	// Store decrypted chunks in a vector
+	std::streamsize ciphertextSize = fileSize - (sizeof(version) + SALT_SIZE + AES_IVLEN + TAG_SIZE);
 	std::vector<unsigned char> decryptedData;
-	// Reserve space to avoid reallocations
-	decryptedData.reserve(ciphertextSize); 
+	decryptedData.reserve(ciphertextSize);
 
 	std::vector<unsigned char> buffer(BUFFER_SIZE);
 	std::vector<unsigned char> decryptedBuffer(BUFFER_SIZE);
@@ -146,14 +153,12 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 	}
 
 	inputFile.read(reinterpret_cast<char*>(tag.data()), TAG_SIZE);
-
 	if (!EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, TAG_SIZE, tag.data())) {
 		throw std::runtime_error("Failed to set authentication tag");
 	}
 
-	int decryptedLen = 0;
-	if (!EVP_CipherFinal_ex(ctx.get(), nullptr, &decryptedLen)) {
-		throw std::runtime_error("Decryption finalization failed. Incorrect password or data tampered.");
+	if (!EVP_CipherFinal_ex(ctx.get(), nullptr, &len)) {
+		throw std::runtime_error("Decryption failed. Possible wrong password or tampered file.");
 	}
 
 	std::ofstream outputFile(outputFilename, std::ios::binary);
@@ -162,6 +167,9 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 	outputFile.write(reinterpret_cast<const char*>(decryptedData.data()), decryptedData.size());
 
 	OPENSSL_cleanse(key.data(), key.size());
+	OPENSSL_cleanse(buffer.data(), buffer.size());
+
+	std::cout << "Decryption successful!" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
