@@ -10,7 +10,7 @@
 #include <conio.h>
 #include <cstring>
 
-const int PBKDF2_ITERATIONS = 400000;
+const int PBKDF2_ITERATIONS = 1000000;
 const size_t BUFFER_SIZE = 4096;
 const int AES_KEYLEN = 32;
 const int AES_IVLEN = 12;
@@ -75,21 +75,25 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
 	outputFile.write(reinterpret_cast<const char*>(iv.data()), AES_IVLEN);
 
 	std::vector<unsigned char> key = deriveKey(password, salt);
+	OPENSSL_cleanse(const_cast<char*>(password.data()), password.length());
 	auto ctx = createCipherContext(EVP_aes_256_gcm(), key.data(), iv.data(), 1);
 
 	std::vector<unsigned char> buffer(BUFFER_SIZE);
 	std::vector<unsigned char> encryptedBuffer(BUFFER_SIZE + TAG_SIZE);
 	int len;
 
-	while (inputFile.read(reinterpret_cast<char*>(buffer.data()), BUFFER_SIZE)) {
-		if (!EVP_CipherUpdate(ctx.get(), encryptedBuffer.data(), &len, buffer.data(), inputFile.gcount())) {
-			throw std::runtime_error("Encryption update failed");
+	while (inputFile) {
+		inputFile.read(reinterpret_cast<char*>(buffer.data()), BUFFER_SIZE);
+		std::streamsize bytesRead = inputFile.gcount();
+		if (bytesRead > 0) {
+			if (!EVP_CipherUpdate(ctx.get(), encryptedBuffer.data(), &len, buffer.data(), bytesRead)) {
+				throw std::runtime_error("Encryption update failed");
+			}
+			outputFile.write(reinterpret_cast<const char*>(encryptedBuffer.data()), len);
 		}
-		outputFile.write(reinterpret_cast<const char*>(encryptedBuffer.data()), len);
 	}
 
 	if (!EVP_CipherFinal_ex(ctx.get(), encryptedBuffer.data(), &len)) {
-		//if final fails, the tag is invalid.
 		throw std::runtime_error("Encryption finalization failed");
 	}
 	outputFile.write(reinterpret_cast<const char*>(encryptedBuffer.data()), len);
@@ -99,6 +103,7 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
 		throw std::runtime_error("Failed to get authentication tag");
 	}
 	outputFile.write(reinterpret_cast<const char*>(tag), TAG_SIZE);
+	outputFile.flush();
 
 	OPENSSL_cleanse(key.data(), key.size());
 	OPENSSL_cleanse(buffer.data(), buffer.size());
@@ -130,6 +135,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 	inputFile.read(reinterpret_cast<char*>(iv.data()), AES_IVLEN);
 
 	std::vector<unsigned char> key = deriveKey(password, salt);
+	OPENSSL_cleanse(const_cast<char*>(password.data()), password.length());
 	auto ctx = createCipherContext(EVP_aes_256_gcm(), key.data(), iv.data(), 0);
 
 	std::streamsize ciphertextSize = fileSize - (sizeof(version) + SALT_SIZE + AES_IVLEN + TAG_SIZE);
@@ -143,21 +149,26 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 	while (ciphertextSize > 0) {
 		std::streamsize readSize = std::min(ciphertextSize, (std::streamsize)BUFFER_SIZE);
 		inputFile.read(reinterpret_cast<char*>(buffer.data()), readSize);
-
-		if (!EVP_CipherUpdate(ctx.get(), decryptedBuffer.data(), &len, buffer.data(), readSize)) {
-			throw std::runtime_error("Decryption update failed");
+		std::streamsize bytesRead = inputFile.gcount();
+		if (bytesRead > 0) {
+			if (!EVP_CipherUpdate(ctx.get(), decryptedBuffer.data(), &len, buffer.data(), bytesRead)) {
+				throw std::runtime_error("Decryption update failed");
+			}
+			decryptedData.insert(decryptedData.end(), decryptedBuffer.begin(), decryptedBuffer.begin() + len);
 		}
-
-		decryptedData.insert(decryptedData.end(), decryptedBuffer.begin(), decryptedBuffer.begin() + len);
-		ciphertextSize -= readSize;
+		ciphertextSize -= bytesRead;
 	}
 
 	inputFile.read(reinterpret_cast<char*>(tag.data()), TAG_SIZE);
+	if (inputFile.gcount() != TAG_SIZE) {
+		throw std::runtime_error("Invalid authentication tag size");
+	}
+
 	if (!EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, TAG_SIZE, tag.data())) {
 		throw std::runtime_error("Failed to set authentication tag");
 	}
 
-	if (!EVP_CipherFinal_ex(ctx.get(), nullptr, &len)) {
+	if (!EVP_CipherFinal_ex(ctx.get(), decryptedBuffer.data(), &len)) {
 		throw std::runtime_error("Decryption failed. Possible wrong password or tampered file.");
 	}
 
@@ -165,6 +176,8 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 	if (!outputFile) throw std::runtime_error("Could not open output file");
 
 	outputFile.write(reinterpret_cast<const char*>(decryptedData.data()), decryptedData.size());
+	outputFile.write(reinterpret_cast<const char*>(decryptedBuffer.data()), len);
+	outputFile.flush();
 
 	OPENSSL_cleanse(key.data(), key.size());
 	OPENSSL_cleanse(buffer.data(), buffer.size());
