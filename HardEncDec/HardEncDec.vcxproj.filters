@@ -18,5 +18,13 @@
     <ClCompile Include="HardEncDec.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="EncDecUtils.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="EncDecUtils.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

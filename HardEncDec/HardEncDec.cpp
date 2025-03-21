@@ -10,6 +10,8 @@
 #include <conio.h>
 #include <cstring>
 
+#include "EncDecUtils.h"
+
 const int PBKDF2_ITERATIONS = 10000000; // 10 million
 const int AES_KEYLEN = 32;
 const int AES_IVLEN = 12;
@@ -108,6 +110,8 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
 	OPENSSL_cleanse(key.data(), key.size());
 	OPENSSL_cleanse(buffer.data(), buffer.size());
 
+	system("cls");
+	std::cout << std::endl;
 	std::cout << "Encryption successful!" << std::endl;
 }
 
@@ -182,66 +186,108 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 	OPENSSL_cleanse(key.data(), key.size());
 	OPENSSL_cleanse(buffer.data(), buffer.size());
 
+	system("cls");
+	std::cout << std::endl;
 	std::cout << "Decryption successful!" << std::endl;
 }
 
+static std::string getInput(const std::string& prompt) {
+	std::string input;
+	std::cout << prompt;
+	std::getline(std::cin, input);
+	return input;
+}
+
+static std::string validateDecryptionFile(const std::string& filename) {
+	if (filename.size() > 4 && filename.substr(filename.size() - 4) == ".enc") {
+		return filename.substr(0, filename.size() - 4);  // Remove .enc extension
+	}
+	std::cout << "\nInvalid file for decryption.\nEncrypted file must end in .enc.\n";
+	return "";
+}
+
+static unsigned int chooseOption() {
+	unsigned int option = 99;
+
+	system("cls");
+	std::cout << std::endl;
+	std::cout << "AES-256-GCM Encryption/Decryption Program with PBKDF2" << std::endl;
+	std::cout << std::endl;
+	std::cout << "=====================================================" << std::endl;
+	std::cout << "1. Generate a 64 character password key" << std::endl;
+	std::cout << "2. Encrypt or Decrypt a file" << std::endl;
+	std::cout << "0. Exit Program" << std::endl;
+	std::cout << "=====================================================" << std::endl;
+	std::cout << std::endl;
+	std::cout << "Enter your option: ";
+	std::cin >> option;
+	std::cin.ignore();
+
+	return option;
+}
+
 int main(int argc, char* argv[]) {
-	std::string filename, mode;
+	std::string filename, mode, selection, password;
+	int option = (argc > 1) ? 2 : chooseOption();
 
-	if (argc > 1) {
-		filename = argv[1];
-	}
-	else {
-		std::cout << "Enter filepath or flename: ";
-		std::getline(std::cin, filename);
-	}
+	while (option != 0) {
+		try {
+			if (option == 1) {
+				std::string key = generateRandomPassword(64);
+				saveKey(key);
 
-	std::cout << "Encrypt(e) or Decrypt(d)? (e/d): ";
-	std::getline(std::cin, mode);
+				system("cls");
+				std::cout << std::endl;
+				std::cout << "\nKey saved to password.key file\n"
+					<< "Store this file safely!\n"
+					<< "If lost, all data is inaccessible!\n\n";
+			}
+			else if (option == 2) {
+				system("cls");
+				std::cout << std::endl;
 
-	std::string password = getPassword();
+				filename = (argc > 1) ? argv[1] : getInput("Enter filepath or filename: ");
+				mode = getInput("Encrypt (e) or Decrypt (d) file?: ");
+				if (mode != "e" && mode != "d") { option = 99; continue; };
 
-	try {
-		std::string outFilename;
-		if (mode == "e") {
-			outFilename = filename + ".enc";
-		}
-		else if (mode == "d") {
-			if (filename.length() > 4 && filename.substr(filename.length() - 4) == ".enc") {
-				outFilename = filename.substr(0, filename.length() - 4);
+				selection = getInput("Enter password (p) or Use password.key (u): ");
+				if (selection != "p" && selection != "u") { option = 99; continue; };
+				password = (selection == "p") ? getPassword() : readKey();
+				if (password.empty()) {
+					std::cout << std::endl;
+					std::cout << "Password is empty. Cannot perform operation" << std::endl;
+					argc = 1;
+				}
+				else {
+					std::string outFilename = (mode == "e") ? filename + ".enc" : [&]() { return validateDecryptionFile(filename); }();
+					if (outFilename.empty()) {
+						std::cout << std::endl;
+						std::cout << "Input file is empty. Cannot perform operation" << std::endl;
+						argc = 1;
+					};
+
+					if (std::ifstream(outFilename) && getInput("Output file exists. Overwrite? (y/n): ") != "y") continue;
+
+					(mode == "e") ? aesEncryptFile(filename, outFilename, password) : aesDecryptFile(filename, outFilename, password);
+					std::cout << "Operation successfully performed.\n";
+				}
+			}
+			else if (option == 9) {
+				option = chooseOption();
+				continue;
 			}
 			else {
-				throw std::runtime_error("Encrypted file must end in .enc");
+				std::cout << "\nInvalid option selected.";
 			}
 		}
-		else {
-			throw std::runtime_error("Invalid mode. Use 'e' or 'd'.");
+		catch (const std::exception& ex) {
+			std::cerr << "\nOperation Error: " << ex.what() << std::endl;
 		}
 
-		if (std::ifstream(outFilename)) {
-			std::cerr << "Output file already exists. Overwrite? (y/n): ";
-			char response;
-			std::cin >> response;
-			if (response != 'y') return 1;
-			std::cin.ignore();
-		}
-
-		if (mode == "e") {
-			aesEncryptFile(filename, outFilename, password);
-		}
-		else if (mode == "d") {
-			aesDecryptFile(filename, outFilename, password);
-		}
-		else {
-			throw std::runtime_error("Invalid mode. Use 'e' or 'd'.");
-		}
-
-		std::cout << "Operation successful!" << std::endl;
-	}
-	catch (const std::exception& e) {
-		std::cerr << "Error: " << e.what() << std::endl;
-		return 1;
+		option = std::stoi(getInput("\nEnter 9 to return / 0 to exit: "));
+		argc = 1;
 	}
 
+	std::cout << "Exiting program.\n";
 	return 0;
 }

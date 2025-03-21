@@ -138,6 +138,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="HardEncDec.cpp" />
+    <ClCompile Include="EncDecUtils.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="EncDecUtils.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
