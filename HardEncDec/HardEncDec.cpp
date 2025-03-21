@@ -10,12 +10,12 @@
 #include <conio.h>
 #include <cstring>
 
-const int PBKDF2_ITERATIONS = 1000000;
-const size_t BUFFER_SIZE = 4096;
+const int PBKDF2_ITERATIONS = 10000000; // 10 million
 const int AES_KEYLEN = 32;
 const int AES_IVLEN = 12;
 const int SALT_SIZE = 16;
 const int TAG_SIZE = 16;
+const size_t BUFFER_SIZE = 4096;
 uint8_t version = 1;
 
 static void handleErrors(const std::string& msg) {
@@ -24,7 +24,7 @@ static void handleErrors(const std::string& msg) {
 
 static std::vector<unsigned char> deriveKey(const std::string& password, const std::vector<unsigned char>& salt) {
 	std::vector<unsigned char> key(AES_KEYLEN);
-	if (!PKCS5_PBKDF2_HMAC(password.c_str(), password.length(), salt.data(), salt.size(), PBKDF2_ITERATIONS, EVP_sha256(), key.size(), key.data())) {
+	if (!PKCS5_PBKDF2_HMAC(password.c_str(), static_cast<int>(password.length()), salt.data(), static_cast<int>(salt.size()), PBKDF2_ITERATIONS, EVP_sha256(), static_cast<int>(key.size()), key.data())) {
 		throw std::runtime_error("Key derivation failed");
 	}
 	return key;
@@ -86,7 +86,7 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
 		inputFile.read(reinterpret_cast<char*>(buffer.data()), BUFFER_SIZE);
 		std::streamsize bytesRead = inputFile.gcount();
 		if (bytesRead > 0) {
-			if (!EVP_CipherUpdate(ctx.get(), encryptedBuffer.data(), &len, buffer.data(), bytesRead)) {
+			if (!EVP_CipherUpdate(ctx.get(), encryptedBuffer.data(), &len, buffer.data(), static_cast<int>(bytesRead))) {
 				throw std::runtime_error("Encryption update failed");
 			}
 			outputFile.write(reinterpret_cast<const char*>(encryptedBuffer.data()), len);
@@ -151,7 +151,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 		inputFile.read(reinterpret_cast<char*>(buffer.data()), readSize);
 		std::streamsize bytesRead = inputFile.gcount();
 		if (bytesRead > 0) {
-			if (!EVP_CipherUpdate(ctx.get(), decryptedBuffer.data(), &len, buffer.data(), bytesRead)) {
+			if (!EVP_CipherUpdate(ctx.get(), decryptedBuffer.data(), &len, buffer.data(), static_cast<int>(bytesRead))) {
 				throw std::runtime_error("Decryption update failed");
 			}
 			decryptedData.insert(decryptedData.end(), decryptedBuffer.begin(), decryptedBuffer.begin() + len);
