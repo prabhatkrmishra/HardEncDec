@@ -12,6 +12,8 @@
 #include <sstream>
 
 #include "EncDecUtils.h"
+#include <ranges>
+#include <algorithm>
 
 class SecureString {
 private:
@@ -86,7 +88,7 @@ static SecureString getPassword() {
     SecureString password;
     std::string tempPassword;
 
-    std::cout << "Enter password for Enc/Dec: ";
+    std::cout << "=> Enter password for Enc/Dec: ";
     char ch;
     while ((ch = _getch()) != '\r') {
         if (ch == 8 && !tempPassword.empty()) { // Backspace
@@ -121,15 +123,6 @@ createCipherContext(const EVP_CIPHER* cipher, const unsigned char* key,
     }
 
     return ctx;
-}
-
-static void showProgress(std::streamsize current, std::streamsize total, const std::string& operation) {
-    if (total > 0) {
-        int percentage = static_cast<int>((current * 100) / total);
-        std::cout << "\r" << operation << " Progress: " << percentage << "% ("
-            << current << "/" << total << " bytes)";
-        std::cout.flush();
-    }
 }
 
 static void aesEncryptFile(const std::string& inputFilename, const std::string& outputFilename, const SecureString& password) {
@@ -359,55 +352,8 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     OPENSSL_cleanse(buffer.data(), buffer.size());
     OPENSSL_cleanse(decryptedBuffer.data(), decryptedBuffer.size());
 
-    std::cout << "\nDecryption successful! File saved as: " << outputFilename
+    std::cout << "\nDecryption successful!\nFile saved as: " << outputFilename
         << " (" << decryptedSize << " bytes)" << std::endl;
-}
-
-static std::string getInput(const std::string& prompt) {
-    std::string input;
-    std::cout << prompt;
-    std::getline(std::cin, input);
-    return input;
-}
-
-static std::string validateDecryptionFile(const std::string& filename) {
-    if (filename.size() > 4 && filename.substr(filename.size() - 4) == ".enc") {
-        return filename.substr(0, filename.size() - 4);
-    }
-    throw std::runtime_error("Invalid file for decryption. Encrypted file must end in .enc");
-}
-
-static bool askOverwrite(const std::string& filename) {
-    if (fileExists(filename)) {
-        std::string response = getInput("Output file exists. Overwrite? (y/n): ");
-        return (response == "y" || response == "Y");
-    }
-    return true;
-}
-
-static unsigned int chooseOption() {
-    unsigned int option = 99;
-
-    system("cls");
-    std::cout << std::endl;
-    std::cout << "AES-256-GCM Encryption/Decryption Program with PBKDF2" << std::endl;
-    std::cout << std::endl;
-    std::cout << "=====================================================" << std::endl;
-    std::cout << "1. Generate a 64 character password key" << std::endl;
-    std::cout << "2. Encrypt or Decrypt a file" << std::endl;
-    std::cout << "0. Exit Program" << std::endl;
-    std::cout << "=====================================================" << std::endl;
-    std::cout << std::endl;
-
-    std::string input = getInput("Enter your option: ");
-    try {
-        option = std::stoi(input);
-    }
-    catch (const std::exception&) {
-        option = 99;
-    }
-
-    return option;
 }
 
 static void initializeOpenSSL() {
@@ -420,111 +366,141 @@ static void cleanupOpenSSL() {
     ERR_free_strings();
 }
 
+static void showHeader() {
+    system("cls");
+    std::cout << std::endl;
+    std::cout << "AES-256-GCM File Encryption/Decryption Tool" << std::endl;
+    std::cout << "===========================================" << std::endl;
+    std::cout << std::endl;
+}
+
+static unsigned int showMenu() {
+    showHeader();
+    std::cout << "1. Generate password key" << std::endl;
+    std::cout << "2. Encrypt/Decrypt a file" << std::endl;
+    std::cout << "0. Exit" << std::endl;
+    std::cout << std::endl;
+
+    std::string input = getInput("Choose option: ");
+    try {
+        return std::stoi(input);
+    }
+    catch (const std::exception&) {
+        return 99;
+    }
+}
+
+static void processFile(const std::string& filename) {
+    bool encrypt = !isEncryptedFile(filename);
+    std::string operation = encrypt ? "Encrypt" : "Decrypt";
+    std::string outputFilename = getOutputFilename(filename, encrypt);
+
+    showHeader();
+    std::cout << "=> File: " << filename << std::endl;
+    std::cout << "=> Operation: " << operation << std::endl;
+    std::cout << "=> Output: " << outputFilename << std::endl;
+    std::cout << std::endl;
+
+    if (!askOverwrite(outputFilename)) {
+        std::cout << "=> Operation cancelled." << std::endl;
+        return;
+    }
+
+    std::string passwordSource = getInput("=> Use (p)assword or (k)ey file? [p/k]: ");
+    passwordSource = toLower(passwordSource);
+
+    SecureString password;
+
+    if (passwordSource == "p" || passwordSource == "password") {
+        password = getPassword();
+    }
+    else if (passwordSource == "k" || passwordSource == "key") {
+        try {
+            std::string key = readKey("password.key");
+            password.assign(key);
+            OPENSSL_cleanse(const_cast<char*>(key.data()), key.size());
+        }
+        catch (const std::exception& e) {
+            std::cout << "Error reading key file: " << e.what() << std::endl;
+            std::cout << "Please generate a key first or use password mode." << std::endl;
+            return;
+        }
+    }
+    else {
+        std::cout << "Invalid choice. Using password mode." << std::endl;
+        password = getPassword();
+    }
+
+    if (password.empty()) {
+        std::cout << "Password is empty. Operation cancelled." << std::endl;
+        return;
+    }
+
+    try {
+        if (encrypt) {
+            aesEncryptFile(filename, outputFilename, password);
+        }
+        else {
+            aesDecryptFile(filename, outputFilename, password);
+        }
+    }
+    catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << std::endl;
+    }
+}
+
 int main(int argc, char* argv[]) {
     initializeOpenSSL();
 
     try {
-        unsigned int option = (argc > 1) ? 2 : chooseOption();
+        // If file is dropped on executable or provided as argument
+        if (argc > 1) {
+            std::string filename = argv[1];
+            if (fileExists(filename)) {
+                processFile(filename);
+            }
+            else {
+                std::cout << "File not found: " << filename << std::endl;
+            }
+
+            std::cout << std::endl;
+            std::string input = getInput("Press Enter to exit...");
+            return 0;
+        }
+
+        // Interactive mode
+        unsigned int option = showMenu();
 
         while (option != 0) {
             try {
                 if (option == 1) {
+                    showHeader();
                     std::string key = generateRandomPassword(64);
                     saveKey(key, "password.key");
-
-                    system("cls");
-                    std::cout << std::endl;
-                    std::cout << "Key saved to password.key file" << std::endl;
-                    std::cout << "Store this file safely!" << std::endl;
-                    std::cout << "If lost, all data is inaccessible!" << std::endl << std::endl;
+                    std::cout << "Key saved to password.key" << std::endl;
+                    std::cout << "Store this file securely!" << std::endl << std::endl;
                 }
                 else if (option == 2) {
-                    std::string filename, mode, passwordSource;
-
-                    if (argc > 1) {
-                        if (argc > 1) filename = argv[1];
-                        if (argc > 2) mode = argv[2];
-                        if (argc > 3) passwordSource = argv[3];
+                    showHeader();
+                    std::string filename = getInput("Enter file path: ");
+                    if (fileExists(filename)) {
+                        processFile(filename);
                     }
                     else {
-                        system("cls");
-                        std::cout << std::endl;
-                        filename = getInput("Enter filepath or filename: ");
-                        mode = getInput("Encrypt (e) or Decrypt (d) file?: ");
-                        passwordSource = getInput("Enter password (p) or Use password.key (u): ");
-                    }
-
-                    if (mode != "e" && mode != "d") {
-                        std::cout << "Invalid mode. Use 'e' for encrypt or 'd' for decrypt." << std::endl;
-                    }
-                    else if (passwordSource != "p" && passwordSource != "u") {
-                        std::cout << "Invalid password source. Use 'p' for password or 'u' for key file." << std::endl;
-                    }
-                    else {
-                        SecureString password;
-
-                        if (passwordSource == "p") {
-                            password = getPassword();
-                        }
-                        else {
-                            std::string key = readKey("password.key");
-                            password.assign(key);
-                            OPENSSL_cleanse(const_cast<char*>(key.data()), key.size());
-                        }
-
-                        if (password.empty()) {
-                            std::cout << "Password is empty. Cannot perform operation." << std::endl;
-                        }
-                        else {
-                            std::string outFilename;
-
-                            if (mode == "e") {
-                                outFilename = filename + ".enc";
-                                if (!askOverwrite(outFilename)) {
-                                    std::cout << "Operation cancelled." << std::endl;
-                                }
-                                else {
-                                    aesEncryptFile(filename, outFilename, password);
-                                }
-                            }
-                            else {
-                                try {
-                                    outFilename = validateDecryptionFile(filename);
-                                    if (!askOverwrite(outFilename)) {
-                                        std::cout << "Operation cancelled." << std::endl;
-                                    }
-                                    else {
-                                        aesDecryptFile(filename, outFilename, password);
-                                    }
-                                }
-                                catch (const std::exception& e) {
-                                    std::cout << e.what() << std::endl;
-                                }
-                            }
-                        }
+                        std::cout << "File not found: " << filename << std::endl;
                     }
                 }
                 else {
-                    std::cout << "Invalid option selected." << std::endl;
+                    std::cout << "Invalid option." << std::endl;
                 }
             }
             catch (const std::exception& ex) {
-                std::cerr << "Operation Error: " << ex.what() << std::endl;
+                std::cerr << "Error: " << ex.what() << std::endl;
             }
 
-            // Reset command line args after first use
-            argc = 1;
-
-            std::string input = getInput("\nEnter 9 for menu, 0 to exit: ");
-            try {
-                option = std::stoi(input);
-                if (option == 9) {
-                    option = chooseOption();
-                }
-            }
-            catch (const std::exception&) {
-                option = 0;
-            }
+            std::cout << std::endl;
+            std::string input = getInput("Press Enter to continue...");
+            option = showMenu();
         }
     }
     catch (const std::exception& ex) {
@@ -534,6 +510,6 @@ int main(int argc, char* argv[]) {
     }
 
     cleanupOpenSSL();
-    std::cout << "Exiting program." << std::endl;
+    std::cout << "Goodbye!" << std::endl;
     return 0;
 }

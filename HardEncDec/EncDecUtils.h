@@ -3,16 +3,16 @@
 #ifndef ENCDEC_UTILS_H
 #define ENCDEC_UTILS_H
 
-#include <string>
+#include <cstring>
 
 // Encryption constants
-const int PBKDF2_ITERATIONS = 10000000; // 10 million iterations
+const int PBKDF2_ITERATIONS = 100000000; // 100 million iterations
 const int AES_KEYLEN = 32;
 const int AES_IVLEN = 12;
 const int SALT_SIZE = 16;
 const int TAG_SIZE = 16;
-const size_t BUFFER_SIZE = 8192;
-const uint8_t FILE_VERSION = 2;
+const size_t BUFFER_SIZE = 512 * 1024; // 512KB
+const uint8_t FILE_VERSION = 3;
 
 std::string generateRandomPassword(size_t length = 64);
 
@@ -20,7 +20,16 @@ void saveKey(const std::string& key, const std::string& filename = "password.key
 std::string readKey(const std::string& filename = "password.key");
 
 bool fileExists(const std::string& filename);
+bool askOverwrite(const std::string& filename);
 bool isValidEncryptedFile(const std::string& filename);
-static void analyzeEncryptedFile(const std::string& filename);
+bool isEncryptedFile(const std::string& filename);
+
+std::string getOutputFilename(const std::string& inputFilename, bool encrypt);
+std::string getInput(const std::string& prompt);
+std::string toLower(const std::string& str);
+std::string validateDecryptionFile(const std::string& filename);
+
+void showProgress(std::streamsize current, std::streamsize total, const std::string& operation);
+void analyzeEncryptedFile(const std::string& filename);
 
 #endif

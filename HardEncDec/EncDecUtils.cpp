@@ -2,6 +2,8 @@
 #include <fstream>
 #include <stdexcept>
 #include <iostream>
+#include <iomanip>
+#include <string>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
@@ -57,9 +59,18 @@ std::string readKey(const std::string& filename) {
     return key;
 }
 
+
 bool fileExists(const std::string& filename) {
     std::ifstream file(filename);
     return file.good();
+}
+
+bool askOverwrite(const std::string& filename) {
+    if (fileExists(filename)) {
+        std::string response = getInput("=> Output file exists. Overwrite? (y/n): ");
+        return (response == "y" || response == "Y");
+    }
+    return true;
 }
 
 bool isValidEncryptedFile(const std::string& filename) {
@@ -89,14 +100,91 @@ bool isValidEncryptedFile(const std::string& filename) {
     // Support both version 1 and 2
     if (version != 1 && version != FILE_VERSION) {
         std::cerr << "Unsupported file version: " << static_cast<int>(version)
-            << " (supported: 1, " << static_cast<int>(FILE_VERSION) << ")" << std::endl;
+            << " (supported version: " << static_cast<int>(FILE_VERSION) << ")"
+            << "\nPlease use older version: V" << static_cast<int>(version) << ".0" << std::endl;
         return false;
     }
 
     return true;
 }
 
-static void analyzeEncryptedFile(const std::string& filename) {
+bool isEncryptedFile(const std::string& filename) {
+    return filename.size() > 4 && toLower(filename).substr(filename.size() - 4) == ".enc";
+}
+
+std::string getInput(const std::string& prompt) {
+    std::string input;
+    std::cout << prompt;
+    std::getline(std::cin, input);
+    return input;
+}
+
+std::string validateDecryptionFile(const std::string& filename) {
+    if (filename.size() > 4 && filename.substr(filename.size() - 4) == ".enc") {
+        return filename.substr(0, filename.size() - 4);
+    }
+    throw std::runtime_error("Invalid file for decryption. Encrypted file must end in .enc");
+}
+
+std::string toLower(const std::string& str) {
+    std::string result = str;
+    std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+    return result;
+}
+
+std::string getOutputFilename(const std::string& inputFilename, bool encrypt) {
+    if (encrypt) {
+        return inputFilename + ".enc";
+    }
+    else {
+        if (isEncryptedFile(inputFilename)) {
+            return inputFilename.substr(0, inputFilename.size() - 4);
+        }
+        return inputFilename + ".decrypted";
+    }
+}
+
+void showProgress(std::streamsize current, std::streamsize total, const std::string& operation) {
+    if (total <= 0) return;
+
+    const int barWidth = 50;
+    double ratio = static_cast<double>(current) / total;
+    int pos = static_cast<int>(barWidth * ratio);
+    int percentage = static_cast<int>(ratio * 100);
+
+    std::string bar;
+
+    if (operation == "Encryption") {
+        for (int i = 0; i < barWidth; ++i) {
+            if (i < pos) bar += "#";
+            else if (i == pos) bar += "|>";
+            else bar += "-";
+        }
+    }
+    else if (operation == "Decryption") {
+        for (int i = 0; i < barWidth; ++i) {
+            if (i < pos) bar += "-";
+            else if (i == pos) bar += "|>";
+            else bar += "#";
+        }
+    }
+    else {
+        for (int i = 0; i < barWidth; ++i) {
+            if (i < pos) bar += "=";
+            else if (i == pos) bar += ">";
+            else bar += " ";
+        }
+    }
+
+    std::cout << "\r" << operation << " [" << bar << "] "
+        << std::setw(3) << percentage << "% "
+        << "(" << current << "/" << total << " bytes)";
+    std::cout.flush();
+
+    if (current >= total) std::cout << std::endl;
+}
+
+void analyzeEncryptedFile(const std::string& filename) {
     std::ifstream file(filename, std::ios::binary);
     if (!file) {
         std::cout << "Cannot open file for analysis: " << filename << std::endl;
