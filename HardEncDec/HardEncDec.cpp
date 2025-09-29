@@ -84,26 +84,61 @@ static std::vector<unsigned char> deriveKey(const SecureString& password, const 
     return key;
 }
 
-static SecureString getPassword() {
+static SecureString getPassword(const std::string& operation) {
     SecureString password;
     std::string tempPassword;
+    std::string confirmPassword;
 
-    std::cout << "=> Enter password for Enc/Dec: ";
-    char ch;
-    while ((ch = _getch()) != '\r') {
-        if (ch == 8 && !tempPassword.empty()) { // Backspace
-            tempPassword.pop_back();
-            std::cout << "\b \b";
+    while (true) {
+        std::cout << "=> Enter password for " << operation << ": ";
+        tempPassword.clear();
+
+        char ch;
+        while ((ch = _getch()) != '\r') {
+            if (ch == 8 && !tempPassword.empty()) { // Backspace
+                tempPassword.pop_back();
+                std::cout << "\b \b";
+            }
+            else if (ch != 8 && ch != '\r') {
+                tempPassword.push_back(ch);
+                std::cout << '*';
+            }
         }
-        else if (ch != 8 && ch != '\r') {
-            tempPassword.push_back(ch);
-            std::cout << '*';
+        std::cout << std::endl;
+
+        if (tempPassword.empty()) {
+            std::cout << "Password cannot be empty. Please try again." << std::endl;
+            continue;
+        }
+
+        std::cout << "=> Confirm password for " << operation << ": ";
+        confirmPassword.clear();
+
+        while ((ch = _getch()) != '\r') {
+            if (ch == 8 && !confirmPassword.empty()) { // Backspace
+                confirmPassword.pop_back();
+                std::cout << "\b \b";
+            }
+            else if (ch != 8 && ch != '\r') {
+                confirmPassword.push_back(ch);
+                std::cout << '*';
+            }
+        }
+        std::cout << std::endl;
+
+        if (tempPassword == confirmPassword) {
+            break;
+        }
+        else {
+            std::cout << "\n[INVALID] Passwords do not match. Please try again.\n" << std::endl;
         }
     }
-    std::cout << std::endl;
 
     password.assign(tempPassword);
+
+    // Cleanse temporary strings from memory
     OPENSSL_cleanse(const_cast<char*>(tempPassword.data()), tempPassword.size());
+    OPENSSL_cleanse(const_cast<char*>(confirmPassword.data()), confirmPassword.size());
 
     return password;
 }
@@ -115,7 +150,7 @@ createCipherContext(const EVP_CIPHER* cipher, const unsigned char* key,
         ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
 
     if (!ctx) {
-        throw std::runtime_error("Failed to create cipher context");
+        throw std::runtime_error("[ERROR] Failed to create cipher context");
     }
 
     if (!EVP_CipherInit_ex(ctx.get(), cipher, nullptr, key, iv, encrypt)) {
@@ -127,17 +162,17 @@ createCipherContext(const EVP_CIPHER* cipher, const unsigned char* key,
 
 static void aesEncryptFile(const std::string& inputFilename, const std::string& outputFilename, const SecureString& password) {
     if (!fileExists(inputFilename)) {
-        throw std::runtime_error("Input file does not exist: " + inputFilename);
+        throw std::runtime_error("[ERROR] Input file does not exist: " + inputFilename);
     }
 
     std::ifstream inputFile(inputFilename, std::ios::binary);
     if (!inputFile) {
-        throw std::runtime_error("Could not open input file: " + inputFilename);
+        throw std::runtime_error("[ERROR] Could not open input file: " + inputFilename);
     }
 
     std::ofstream outputFile(outputFilename, std::ios::binary);
     if (!outputFile) {
-        throw std::runtime_error("Could not open output file: " + outputFilename);
+        throw std::runtime_error("[ERROR] Could not open output file: " + outputFilename);
     }
 
     // Get file size for progress reporting
@@ -153,7 +188,7 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
     std::vector<unsigned char> iv(AES_IVLEN);
 
     if (RAND_bytes(salt.data(), SALT_SIZE) != 1 || RAND_bytes(iv.data(), AES_IVLEN) != 1) {
-        throw std::runtime_error("Random number generation failed");
+        throw std::runtime_error("[ERROR] Random number generation failed");
     }
 
     outputFile.write(reinterpret_cast<const char*>(salt.data()), SALT_SIZE);
@@ -171,33 +206,33 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
     int len;
 
     // Encrypt file data
+    std::cout << "\n";
     while (inputFile.read(reinterpret_cast<char*>(buffer.data()), BUFFER_SIZE) || inputFile.gcount() > 0) {
         std::streamsize bytesRead = inputFile.gcount();
         totalRead += bytesRead;
 
         if (!EVP_CipherUpdate(ctx.get(), encryptedBuffer.data(), &len, buffer.data(), static_cast<int>(bytesRead))) {
-            throw std::runtime_error("Encryption update failed");
+            throw std::runtime_error("[ERROR] Encryption update failed");
         }
         outputFile.write(reinterpret_cast<const char*>(encryptedBuffer.data()), len);
-
         showProgress(totalRead, fileSize, "Encryption");
     }
 
     // Finalize encryption
     if (!EVP_CipherFinal_ex(ctx.get(), encryptedBuffer.data(), &len)) {
-        throw std::runtime_error("Encryption finalization failed");
+        throw std::runtime_error("[ERROR] Encryption finalization failed");
     }
     outputFile.write(reinterpret_cast<const char*>(encryptedBuffer.data()), len);
 
     // Get and write authentication tag
     unsigned char tag[TAG_SIZE];
     if (!EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, TAG_SIZE, tag)) {
-        throw std::runtime_error("Failed to get authentication tag");
+        throw std::runtime_error("[ERROR] Failed to get authentication tag");
     }
     outputFile.write(reinterpret_cast<const char*>(tag), TAG_SIZE);
 
     if (!outputFile.good()) {
-        throw std::runtime_error("Error writing to output file");
+        throw std::runtime_error("[ERROR] Error writing to output file");
     }
 
     // Clean up sensitive data
@@ -205,29 +240,29 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
     OPENSSL_cleanse(buffer.data(), buffer.size());
     OPENSSL_cleanse(encryptedBuffer.data(), encryptedBuffer.size());
 
-    std::cout << "\nEncryption successful! File saved as: " << outputFilename << std::endl;
+    std::cout << "\n[DONE] Encryption successful!\n[DONE] File saved as: " << outputFilename << std::endl;
 }
 
 static void aesDecryptFile(const std::string& inputFilename, const std::string& outputFilename, const SecureString& password) {
     if (!isValidEncryptedFile(inputFilename)) {
-        throw std::runtime_error("Invalid or corrupted encrypted file: " + inputFilename);
+        throw std::runtime_error("[ERROR] Invalid or corrupted encrypted file: " + inputFilename);
     }
 
     std::ifstream inputFile(inputFilename, std::ios::binary);
     if (!inputFile) {
-        throw std::runtime_error("Could not open input file: " + inputFilename);
+        throw std::runtime_error("[ERROR] Could not open input file: " + inputFilename);
     }
 
     // Read and validate version
     uint8_t fileVersion;
     inputFile.read(reinterpret_cast<char*>(&fileVersion), sizeof(fileVersion));
     if (!inputFile) {
-        throw std::runtime_error("Failed to read file version");
+        throw std::runtime_error("[ERROR] Failed to read file version");
     }
 
     // Support both version 1 and 2 for backward compatibility
     if (fileVersion != 1 && fileVersion != FILE_VERSION) {
-        throw std::runtime_error("Unsupported file version: " + std::to_string(fileVersion) +
+        throw std::runtime_error("[ERROR] Unsupported file version: " + std::to_string(fileVersion) +
             " (expected 1 or " + std::to_string(FILE_VERSION) + ")");
     }
 
@@ -235,7 +270,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     std::vector<unsigned char> salt(SALT_SIZE);
     inputFile.read(reinterpret_cast<char*>(salt.data()), SALT_SIZE);
     if (inputFile.gcount() != SALT_SIZE) {
-        throw std::runtime_error("Failed to read salt: expected " +
+        throw std::runtime_error("[ERROR] Failed to read salt: expected " +
             std::to_string(SALT_SIZE) + " bytes, got " +
             std::to_string(inputFile.gcount()));
     }
@@ -244,7 +279,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     std::vector<unsigned char> iv(AES_IVLEN);
     inputFile.read(reinterpret_cast<char*>(iv.data()), AES_IVLEN);
     if (inputFile.gcount() != AES_IVLEN) {
-        throw std::runtime_error("Failed to read IV: expected " +
+        throw std::runtime_error("[ERROR] Failed to read IV: expected " +
             std::to_string(AES_IVLEN) + " bytes, got " +
             std::to_string(inputFile.gcount()));
     }
@@ -256,7 +291,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     // Calculate ciphertext size (excluding header and tag)
     std::streamsize headerSize = sizeof(fileVersion) + SALT_SIZE + AES_IVLEN + TAG_SIZE;
     if (fileSize < headerSize) {
-        throw std::runtime_error("File too small to be a valid encrypted file");
+        throw std::runtime_error("[ERROR] File too small to be a valid encrypted file");
     }
 
     std::streamsize ciphertextSize = fileSize - headerSize;
@@ -272,7 +307,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 
     std::ofstream outputFile(outputFilename, std::ios::binary);
     if (!outputFile) {
-        throw std::runtime_error("Could not open output file: " + outputFilename);
+        throw std::runtime_error("[ERROR] Could not open output file: " + outputFilename);
     }
 
     std::vector<unsigned char> buffer(BUFFER_SIZE);
@@ -281,6 +316,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     int len;
 
     // Read and decrypt file data in chunks
+    std::cout << "\n";
     while (ciphertextSize > 0) {
         std::streamsize readSize = std::min(ciphertextSize, static_cast<std::streamsize>(BUFFER_SIZE));
         inputFile.read(reinterpret_cast<char*>(buffer.data()), readSize);
@@ -290,7 +326,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 
         // Decrypt the chunk
         if (!EVP_CipherUpdate(ctx.get(), decryptedBuffer.data(), &len, buffer.data(), static_cast<int>(bytesRead))) {
-            throw std::runtime_error("Decryption update failed");
+            throw std::runtime_error("[ERROR] Decryption update failed");
         }
 
         // Write the decrypted chunk
@@ -310,20 +346,20 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     std::vector<unsigned char> tag(TAG_SIZE);
     inputFile.read(reinterpret_cast<char*>(tag.data()), TAG_SIZE);
     if (inputFile.gcount() != TAG_SIZE) {
-        throw std::runtime_error("Invalid authentication tag: expected " +
+        throw std::runtime_error("[ERROR] Invalid authentication tag: expected " +
             std::to_string(TAG_SIZE) + " bytes, got " +
             std::to_string(inputFile.gcount()));
     }
 
     // Set tag for verification
     if (!EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, TAG_SIZE, tag.data())) {
-        throw std::runtime_error("Failed to set authentication tag");
+        throw std::runtime_error("[ERROR] Failed to set authentication tag");
     }
 
     // Finalize decryption and verify tag
     int finalLen;
     if (!EVP_CipherFinal_ex(ctx.get(), decryptedBuffer.data(), &finalLen)) {
-        throw std::runtime_error("Decryption failed. Wrong password or tampered file.");
+        throw std::runtime_error("[ERROR] Decryption failed. Wrong password or tampered file.");
     }
 
     // Write any remaining decrypted data
@@ -334,7 +370,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     // Verify the output file was written correctly
     outputFile.flush();
     if (!outputFile.good()) {
-        throw std::runtime_error("Error writing to output file");
+        throw std::runtime_error("[ERROR] Error writing to output file");
     }
     outputFile.close();
 
@@ -344,7 +380,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     checkFile.close();
 
     if (decryptedSize == 0) {
-        throw std::runtime_error("Decrypted file is empty - decryption may have failed");
+        throw std::runtime_error("[ERROR] Decrypted file is empty - decryption may have failed");
     }
 
     // Clean up sensitive data
@@ -352,7 +388,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     OPENSSL_cleanse(buffer.data(), buffer.size());
     OPENSSL_cleanse(decryptedBuffer.data(), decryptedBuffer.size());
 
-    std::cout << "\nDecryption successful!\nFile saved as: " << outputFilename
+    std::cout << "\n[DONE] Decryption successful!\n[DONE] File saved as: " << outputFilename
         << " (" << decryptedSize << " bytes)" << std::endl;
 }
 
@@ -392,13 +428,13 @@ static unsigned int showMenu() {
 
 static void processFile(const std::string& filename) {
     bool encrypt = !isEncryptedFile(filename);
-    std::string operation = encrypt ? "Encrypt" : "Decrypt";
+    std::string operation = encrypt ? "Encryption" : "Decryption";
     std::string outputFilename = getOutputFilename(filename, encrypt);
 
     showHeader();
-    std::cout << "=> File: " << filename << std::endl;
-    std::cout << "=> Operation: " << operation << std::endl;
-    std::cout << "=> Output: " << outputFilename << std::endl;
+    std::cout << "=> [INPUT FILE]: " << filename << std::endl;
+    std::cout << "=> [OPERATION]: " << operation << std::endl;
+    std::cout << "=> [OUTPUT FILE]: " << outputFilename << std::endl;
     std::cout << std::endl;
 
     if (!askOverwrite(outputFilename)) {
@@ -412,7 +448,7 @@ static void processFile(const std::string& filename) {
     SecureString password;
 
     if (passwordSource == "p" || passwordSource == "password") {
-        password = getPassword();
+        password = getPassword(operation);
     }
     else if (passwordSource == "k" || passwordSource == "key") {
         try {
@@ -428,7 +464,7 @@ static void processFile(const std::string& filename) {
     }
     else {
         std::cout << "Invalid choice. Using password mode." << std::endl;
-        password = getPassword();
+        password = getPassword(operation);
     }
 
     if (password.empty()) {

@@ -176,7 +176,7 @@ void showProgress(std::streamsize current, std::streamsize total, const std::str
         }
     }
 
-    std::cout << "\r" << operation << " [" << bar << "] "
+    std::cout << "\r[" << operation << "] [" << bar << "] "
         << std::setw(3) << percentage << "% "
         << "(" << current << "/" << total << " bytes)";
     std::cout.flush();
