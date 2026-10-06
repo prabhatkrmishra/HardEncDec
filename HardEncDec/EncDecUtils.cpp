@@ -104,13 +104,7 @@ bool fileExists(const std::string& filename) {
     return std::filesystem::is_regular_file(filename, ec);
 }
 
-bool askOverwrite(const std::string& filename) {
-    if (fileExists(filename)) {
-        std::string response = getInput("=> Output file exists. Overwrite? (y/n): ");
-        return (response == "y" || response == "Y");
-    }
-    return true;
-}
+
 
 // Smallest file that can be a valid encrypted file: version + salt + iv + tag.
 static const std::streamsize MIN_ENCRYPTED_SIZE = sizeof(uint8_t) + SALT_SIZE + AES_IVLEN + TAG_SIZE;
@@ -256,6 +250,23 @@ std::string getInput(const std::string& prompt) {
     std::string input;
     readInputLine(input, prompt, false);
     return input;
+}
+
+bool askOverwrite(const std::string& filename) {
+    if (!fileExists(filename)) return true;
+
+    // One keypress, matching the menu. Only free text needs Enter.
+    while (true) {
+        std::cout << "=> Output file exists. Overwrite? (y/n): " << std::flush;
+        int ch = readImmediateKey();
+        if (ch < 0) return false;
+        char c = static_cast<char>(ch);
+        if (c == 'y' || c == 'Y' || c == 'n' || c == 'N') {
+            std::cout << c << std::endl;
+            return (c == 'y' || c == 'Y');
+        }
+        std::cout << "\nInvalid choice. Press y or n." << std::endl;
+    }
 }
 
 std::string toLower(const std::string& str) {

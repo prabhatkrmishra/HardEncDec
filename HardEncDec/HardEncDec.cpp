@@ -519,6 +519,13 @@ static char readChoiceKey(const std::string& prompt) {
     }
 }
 
+// The menu clears the screen on every redraw, so anything worth reading gets a beat
+// to be read first. Cancellations are skipped; the user just made that choice.
+static void pauseForKey() {
+    std::cout << "\nPress any key to continue..." << std::endl;
+    readImmediateKey();
+}
+
 static void processFile(const std::string& filename) {
     const bool encrypt = !isEncryptedFile(filename);
 
@@ -528,6 +535,7 @@ static void processFile(const std::string& filename) {
     if (encrypt && isValidEncryptedFile(filename)) {
         std::cout << "This file is already encrypted but does not end in .enc." << std::endl;
         std::cout << "Rename it to end in .enc and run this again to decrypt it." << std::endl;
+        pauseForKey();
         return;
     }
 
@@ -569,6 +577,7 @@ static void processFile(const std::string& filename) {
         catch (const std::exception& e) {
             std::cout << "Error reading key file: " << e.what() << std::endl;
             std::cout << "Please generate a key first or use password mode." << std::endl;
+            pauseForKey();
             return;
         }
     }
@@ -596,6 +605,8 @@ static void processFile(const std::string& filename) {
     catch (const std::exception& e) {
         std::cout << "Error: " << e.what() << std::endl;
     }
+
+    pauseForKey();
 }
 
 int main(int argc, char* argv[]) {
@@ -604,15 +615,12 @@ int main(int argc, char* argv[]) {
         if (argc > 1) {
             std::string filename = argv[1];
             if (fileExists(filename)) {
+                // processFile pauses before returning.
                 processFile(filename);
+                return 0;
             }
-            else {
-                reportUnusableInput(filename);
-            }
-
-            std::cout << std::endl;
-            std::string ignored;
-            readInputLine(ignored, "Press Enter to exit...", false);
+            reportUnusableInput(filename);
+            pauseForKey();
             return 0;
         }
 
@@ -627,7 +635,8 @@ int main(int argc, char* argv[]) {
                     saveKey(key, "password.key");
                     OPENSSL_cleanse(key.data(), key.size());
                     std::cout << "Key saved to password.key" << std::endl;
-                    std::cout << "Store this file securely!" << std::endl << std::endl;
+                    std::cout << "Store this file securely!" << std::endl;
+                    pauseForKey();
                 }
                 else if (option == 2) {
                     showHeader();
@@ -637,6 +646,7 @@ int main(int argc, char* argv[]) {
                     }
                     else {
                         reportUnusableInput(filename);
+                        pauseForKey();
                     }
                 }
                 else {
