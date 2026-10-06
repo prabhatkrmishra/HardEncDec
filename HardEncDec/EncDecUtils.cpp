@@ -228,15 +228,20 @@ bool readInputLine(std::string& out, const std::string& prompt, bool masked) {
             g_inputClosed = false;
             return true;
         }
+        // Echo has to be flushed per character. The terminal's own echo is off in
+        // raw mode, so without this nothing appears until the newline flushes the
+        // buffer, which makes a pasted path look like it was never typed.
         if (ch == 8) {
             if (!out.empty()) {
                 out.pop_back();
-                if (masked) std::cout << "\b \b";
+                if (masked) {
+                    std::cout << "\b \b" << std::flush;
+                }
             }
         }
         else if (ch >= 32 && ch < 127) {
             out.push_back(static_cast<char>(ch));
-            std::cout << (masked ? '*' : static_cast<char>(ch));
+            std::cout << (masked ? '*' : static_cast<char>(ch)) << std::flush;
         }
     }
 }
