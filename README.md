@@ -55,7 +55,61 @@ records the parameters needed to reproduce the key.
 
 ## Building
 
+### Windows
+
 Visual Studio 2022 (v143), C++20. The project links OpenSSL statically from
 `C:\OpenSSL-Win64` — both the include and library paths are set in `HardEncDec.vcxproj`
 for the x64 Debug and Release configurations and need adjusting for your machine.
 Release x64 uses the static CRT (`MultiThreaded`).
+
+### Linux
+
+There is no Makefile or CMake project — `HardEncDec.sln` is MSBuild-only — so build with
+the compiler directly. The sources also use two Windows-only APIs and rely on a
+transitive include, so three small edits are required first.
+
+**1. Install the dependencies:**
+
+```sh
+sudo apt install build-essential libssl-dev
+```
+
+**2. Replace `<conio.h>` and `_getch()`.** `conio.h` does not exist on Linux. Swap the
+include at `HardEncDec.cpp:10` for a termios-based single-character read, and change both
+`_getch()` calls (lines 98 and 118) to `hardencdec_getch()`:
+
+```cpp
+#include <termios.h>
+#include <unistd.h>
+
+static char hardencdec_getch() {
+    struct termios oldt, newt;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    char ch = 0;
+    ssize_t n = read(STDIN_FILENO, &ch, 1);
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    if (n <= 0) return (char)13;
+    return ch == (char)10 ? (char)13 : ch;
+}
+```
+
+This keeps the masked password prompt working and still returns `\r` on Enter, which is
+what the existing loops compare against.
+
+**3. Change `system("cls")` to `system("clear")`** at `HardEncDec.cpp:437`.
+
+**4. Add `#include <algorithm>` to `EncDecUtils.cpp`.** `toLower()` calls
+`std::transform` without the include; MSVC supplies it transitively, g++ does not and
+fails with `'transform' is not a member of 'std'`.
+
+Then build:
+
+```sh
+g++ -std=c++20 -O2 HardEncDec.cpp EncDecUtils.cpp -lcrypto -o HardEncDec
+```
+
+Only `-lcrypto` is needed; the tool uses no TLS APIs. Expect one warning from
+`system("clear")` about an unused return value, which is harmless.
