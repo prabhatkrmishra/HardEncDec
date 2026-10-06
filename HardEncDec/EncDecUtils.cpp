@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <filesystem>
 #include <random>
 #include <fstream>
 #include <stdexcept>
@@ -61,8 +63,10 @@ std::string readKey(const std::string& filename) {
 
 
 bool fileExists(const std::string& filename) {
-    std::ifstream file(filename);
-    return file.good();
+    // A directory opens successfully as an ifstream, so opening is not proof that the
+    // path is a readable input. Only regular files are valid here.
+    std::error_code ec;
+    return std::filesystem::is_regular_file(filename, ec);
 }
 
 bool askOverwrite(const std::string& filename) {
@@ -141,7 +145,10 @@ std::string getOutputFilename(const std::string& inputFilename, bool encrypt) {
     }
     else {
         if (isEncryptedFile(inputFilename)) {
-            return inputFilename.substr(0, inputFilename.size() - 4);
+            std::string stripped = inputFilename.substr(0, inputFilename.size() - 4);
+            if (!stripped.empty()) {
+                return stripped;
+            }
         }
         return inputFilename + ".decrypted";
     }

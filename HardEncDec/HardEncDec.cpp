@@ -7,14 +7,92 @@
 #include <openssl/err.h>
 #include <memory>
 #include <stdexcept>
+#ifdef _WIN32
 #include <conio.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+#endif
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
+#include <filesystem>
 
 #include "EncDecUtils.h"
 #include <ranges>
 #include <algorithm>
+
+// Returns the next keystroke, or -1 for "no character": end of input, or an extended
+// key such as an arrow whose scan code must never become password content.
+static int readKeyChar() {
+#ifdef _WIN32
+    int c = _getch();
+    if (c == 0 || c == 224) {
+        _getch();
+        return -1;
+    }
+    return c;
+#else
+    struct termios oldTerm, newTerm;
+    if (tcgetattr(STDIN_FILENO, &oldTerm) != 0) return -1;
+    newTerm = oldTerm;
+    newTerm.c_lflag &= ~(ICANON | ECHO);
+    newTerm.c_cc[VMIN] = 1;
+    newTerm.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &newTerm) != 0) return -1;
+
+    unsigned char ch = 0;
+    ssize_t n = read(STDIN_FILENO, &ch, 1);
+    int result = -1;
+    if (n == 1) {
+        if (ch == 0x1B) {
+            // Arrows and function keys send ESC followed by more bytes; a timed read
+            // swallows the remainder so it cannot become password content.
+            newTerm.c_cc[VMIN] = 0;
+            newTerm.c_cc[VTIME] = 1;
+            if (tcsetattr(STDIN_FILENO, TCSANOW, &newTerm) == 0) {
+                char seq[8];
+                ssize_t got = read(STDIN_FILENO, seq, sizeof(seq));
+                (void)got;
+            }
+        }
+        else if (ch == '\n') result = '\r';
+        else if (ch == 0x7F) result = 8;
+        else result = static_cast<unsigned char>(ch);
+    }
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldTerm);
+    return result;
+#endif
+}
+
+// Reads one line with each character echoed as '*'. Returns false if input ends
+// before Enter, so callers can exit instead of looping on a closed stream.
+static bool readMaskedLine(std::string& out, const std::string& prompt) {
+    out.clear();
+    std::cout << prompt;
+    while (true) {
+        int ch = readKeyChar();
+        if (ch < 0) {
+            std::cout << std::endl;
+            return false;
+        }
+        if (ch == '\r') {
+            std::cout << std::endl;
+            return true;
+        }
+        if (ch == 8) {
+            if (!out.empty()) {
+                out.pop_back();
+                std::cout << "\b \b";
+            }
+        }
+        else if (ch >= 32 && ch < 127) {
+            out.push_back(static_cast<char>(ch));
+            std::cout << '*';
+        }
+    }
+}
 
 class SecureString {
 private:
@@ -85,63 +163,44 @@ static std::vector<unsigned char> deriveKey(const SecureString& password, const 
     return key;
 }
 
-static SecureString getPassword(const std::string& operation) {
-    SecureString password;
+static bool getPassword(const std::string& operation, SecureString& password) {
     std::string tempPassword;
     std::string confirmPassword;
 
-    while (true) {
-        std::cout << "=> Enter password for " << operation << ": ";
-        tempPassword.clear();
+    auto scrub = [&]() {
+        OPENSSL_cleanse(tempPassword.data(), tempPassword.size());
+        OPENSSL_cleanse(confirmPassword.data(), confirmPassword.size());
+    };
 
-        char ch;
-        while ((ch = _getch()) != '\r') {
-            if (ch == 8 && !tempPassword.empty()) { // Backspace
-                tempPassword.pop_back();
-                std::cout << "\b \b";
-            }
-            else if (ch != 8 && ch != '\r') {
-                tempPassword.push_back(ch);
-                std::cout << '*';
-            }
+    while (true) {
+        if (!readMaskedLine(tempPassword, "=> Enter password for " + operation + ": ")) {
+            scrub();
+            return false;
         }
-        std::cout << std::endl;
 
         if (tempPassword.empty()) {
+            scrub();
             std::cout << "Password cannot be empty. Please try again." << std::endl;
             continue;
         }
 
-        std::cout << "=> Confirm password for " << operation << ": ";
-        confirmPassword.clear();
-
-        while ((ch = _getch()) != '\r') {
-            if (ch == 8 && !confirmPassword.empty()) { // Backspace
-                confirmPassword.pop_back();
-                std::cout << "\b \b";
-            }
-            else if (ch != 8 && ch != '\r') {
-                confirmPassword.push_back(ch);
-                std::cout << '*';
-            }
+        if (!readMaskedLine(confirmPassword, "=> Confirm password for " + operation + ": ")) {
+            scrub();
+            return false;
         }
-        std::cout << std::endl;
 
         if (tempPassword == confirmPassword) {
             break;
         }
-        else {
-            std::cout << "\n[INVALID] Passwords do not match. Please try again.\n" << std::endl;
-        }
+
+        scrub();
+        std::cout << "\n[INVALID] Passwords do not match. Please try again.\n" << std::endl;
     }
 
     password.assign(tempPassword);
+    scrub();
 
-    // Cleanse temporary strings from memory
-    OPENSSL_cleanse(const_cast<char*>(tempPassword.data()), tempPassword.size());
-    OPENSSL_cleanse(const_cast<char*>(confirmPassword.data()), confirmPassword.size());
-
-    return password;
+    return true;
 }
 
 static std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>
@@ -161,6 +220,96 @@ createCipherContext(const EVP_CIPHER* cipher, const unsigned char* key,
     return ctx;
 }
 
+// Writes to a scratch file beside the target and moves it into place only on commit.
+// Opening the target directly truncates it before the password is known to be correct,
+// destroying an existing file whenever the operation failed or was interrupted.
+class AtomicOutput {
+public:
+    explicit AtomicOutput(const std::string& targetPath) : targetPath_(targetPath) {
+        // A random name keeps concurrent runs from colliding and stops a name planted
+        // at the target path from being followed.
+        for (int attempt = 0; attempt < 16; ++attempt) {
+            unsigned char suffix[8];
+            if (RAND_bytes(suffix, sizeof(suffix)) != 1) {
+                throw std::runtime_error("[ERROR] Random number generation failed");
+            }
+            static const char* hex = "0123456789abcdef";
+            std::string name;
+            for (unsigned char b : suffix) {
+                name += hex[b >> 4];
+                name += hex[b & 0x0F];
+            }
+            tempPath_ = targetPath_ + "." + name + ".hedtmp";
+            std::error_code existsEc;
+            if (!std::filesystem::exists(tempPath_, existsEc)) {
+                break;
+            }
+            tempPath_.clear();
+        }
+        if (tempPath_.empty()) {
+            throw std::runtime_error("[ERROR] Could not create a unique temporary file");
+        }
+
+        stream_.open(tempPath_, std::ios::binary | std::ios::trunc);
+        if (!stream_) {
+            // The destructor does not run for a constructor that throws.
+            std::error_code removeEc;
+            std::filesystem::remove(tempPath_, removeEc);
+            throw std::runtime_error("[ERROR] Could not create temporary file: " + tempPath_);
+        }
+    }
+
+    ~AtomicOutput() {
+        if (!committed_) {
+            if (stream_.is_open()) {
+                stream_.close();
+            }
+            std::error_code ec;
+            std::filesystem::remove(tempPath_, ec);
+        }
+    }
+
+    std::ofstream& stream() { return stream_; }
+
+    // Closes the scratch file and moves it over the target, returning the byte count.
+    // Throws on any failure, leaving removal of the scratch file to the destructor.
+    std::uintmax_t commit() {
+        stream_.flush();
+        if (!stream_.good()) {
+            throw std::runtime_error("[ERROR] Error writing to output file");
+        }
+        stream_.close();
+        if (stream_.fail()) {
+            throw std::runtime_error("[ERROR] Error closing output file");
+        }
+
+        std::error_code ec;
+        std::uintmax_t size = std::filesystem::file_size(tempPath_, ec);
+        if (ec) {
+            throw std::runtime_error("[ERROR] Could not read output file size: " + tempPath_);
+        }
+
+        // std::filesystem::rename replaces an existing target on Windows, which the
+        // C rename() does not.
+        std::filesystem::rename(tempPath_, targetPath_, ec);
+        if (ec) {
+            throw std::runtime_error("[ERROR] Could not replace output file: " + targetPath_);
+        }
+
+        committed_ = true;
+        return size;
+    }
+
+    AtomicOutput(const AtomicOutput&) = delete;
+    AtomicOutput& operator=(const AtomicOutput&) = delete;
+
+private:
+    std::string targetPath_;
+    std::string tempPath_;
+    std::ofstream stream_;
+    bool committed_ = false;
+};
+
 static void aesEncryptFile(const std::string& inputFilename, const std::string& outputFilename, const SecureString& password) {
     if (!fileExists(inputFilename)) {
         throw std::runtime_error("[ERROR] Input file does not exist: " + inputFilename);
@@ -171,15 +320,16 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
         throw std::runtime_error("[ERROR] Could not open input file: " + inputFilename);
     }
 
-    std::ofstream outputFile(outputFilename, std::ios::binary);
-    if (!outputFile) {
-        throw std::runtime_error("[ERROR] Could not open output file: " + outputFilename);
-    }
-
     // Get file size for progress reporting
     inputFile.seekg(0, std::ios::end);
     std::streamsize fileSize = inputFile.tellg();
     inputFile.seekg(0, std::ios::beg);
+    if (fileSize < 0) {
+        throw std::runtime_error("[ERROR] Could not determine size of input file: " + inputFilename);
+    }
+
+    AtomicOutput output(outputFilename);
+    std::ofstream& outputFile = output.stream();
 
     // Write file version
     outputFile.write(reinterpret_cast<const char*>(&FILE_VERSION), sizeof(FILE_VERSION));
@@ -232,9 +382,7 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
     }
     outputFile.write(reinterpret_cast<const char*>(tag), TAG_SIZE);
 
-    if (!outputFile.good()) {
-        throw std::runtime_error("[ERROR] Error writing to output file");
-    }
+    output.commit();
 
     // Clean up sensitive data
     OPENSSL_cleanse(key.data(), key.size());
@@ -243,32 +391,6 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
 
     std::cout << "\n[DONE] Encryption successful!\n[DONE] File saved as: " << outputFilename << std::endl;
 }
-
-// GCM authenticates only after the final block, so a wrong password or a tampered
-// file leaves unauthenticated bytes on disk before the tag check runs. This removes
-// the partial output on any failure rather than leaving a corrupt file behind.
-class OutputFileGuard {
-public:
-    OutputFileGuard(const std::string& path, std::ofstream& stream)
-        : path_(path), stream_(stream) {}
-
-    ~OutputFileGuard() {
-        if (!committed_) {
-            stream_.close();
-            std::remove(path_.c_str());
-        }
-    }
-
-    void commit() { committed_ = true; }
-
-    OutputFileGuard(const OutputFileGuard&) = delete;
-    OutputFileGuard& operator=(const OutputFileGuard&) = delete;
-
-private:
-    const std::string& path_;
-    std::ofstream& stream_;
-    bool committed_ = false;
-};
 
 static void aesDecryptFile(const std::string& inputFilename, const std::string& outputFilename, const SecureString& password) {
     if (!isValidEncryptedFile(inputFilename)) {
@@ -316,6 +438,9 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     // Get file size
     inputFile.seekg(0, std::ios::end);
     std::streamsize fileSize = inputFile.tellg();
+    if (fileSize < 0) {
+        throw std::runtime_error("[ERROR] Could not determine size of input file: " + inputFilename);
+    }
 
     // Calculate ciphertext size (excluding header and tag)
     std::streamsize headerSize = sizeof(fileVersion) + SALT_SIZE + AES_IVLEN + TAG_SIZE;
@@ -334,11 +459,8 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     // Initialize decryption context
     auto ctx = createCipherContext(EVP_aes_256_gcm(), key.data(), iv.data(), 0);
 
-    std::ofstream outputFile(outputFilename, std::ios::binary);
-    if (!outputFile) {
-        throw std::runtime_error("[ERROR] Could not open output file: " + outputFilename);
-    }
-    OutputFileGuard outputGuard(outputFilename, outputFile);
+    AtomicOutput output(outputFilename);
+    std::ofstream& outputFile = output.stream();
 
     std::vector<unsigned char> buffer(BUFFER_SIZE);
     std::vector<unsigned char> decryptedBuffer(BUFFER_SIZE + EVP_MAX_BLOCK_LENGTH);
@@ -367,9 +489,6 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
         totalRead += bytesRead;
         ciphertextSize -= bytesRead;
         showProgress(totalRead, fileSize - headerSize, "Decryption");
-
-        // Check if we've read all ciphertext
-        if (bytesRead < readSize) break;
     }
 
     // Read authentication tag (the last TAG_SIZE bytes of the file)
@@ -397,22 +516,9 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
         outputFile.write(reinterpret_cast<const char*>(decryptedBuffer.data()), finalLen);
     }
 
-    // Verify the output file was written correctly
-    outputFile.flush();
-    if (!outputFile.good()) {
-        throw std::runtime_error("[ERROR] Error writing to output file");
-    }
-    outputFile.close();
-
-    // Verify the decrypted file size is reasonable
-    std::ifstream checkFile(outputFilename, std::ios::binary | std::ios::ate);
-    std::streamsize decryptedSize = checkFile.tellg();
-    checkFile.close();
-
-    if (decryptedSize == 0) {
-        throw std::runtime_error("[ERROR] Decrypted file is empty - decryption may have failed");
-    }
-    outputGuard.commit();
+    // The tag has verified, so the plaintext is authentic and an empty result is a
+    // legitimately empty file rather than a failed decryption.
+    const std::uintmax_t decryptedSize = output.commit();
 
     // Clean up sensitive data
     OPENSSL_cleanse(key.data(), key.size());
@@ -434,7 +540,11 @@ static void cleanupOpenSSL() {
 }
 
 static void showHeader() {
+#ifdef _WIN32
     system("cls");
+#else
+    system("clear");
+#endif
     std::cout << std::endl;
     std::cout << "AES-256-GCM File Encryption/Decryption Tool" << std::endl;
     std::cout << "===========================================" << std::endl;
@@ -454,6 +564,18 @@ static unsigned int showMenu() {
     }
     catch (const std::exception&) {
         return 99;
+    }
+}
+
+// fileExists only accepts regular files, so a rejected path is either missing or a
+// directory; say which, because "File not found" on a folder is misleading.
+static void reportUnusableInput(const std::string& filename) {
+    std::error_code ec;
+    if (std::filesystem::is_directory(filename, ec)) {
+        std::cout << "Not a regular file: " << filename << std::endl;
+    }
+    else {
+        std::cout << "File not found: " << filename << std::endl;
     }
 }
 
@@ -479,7 +601,10 @@ static void processFile(const std::string& filename) {
     SecureString password;
 
     if (passwordSource == "p" || passwordSource == "password") {
-        password = getPassword(operation);
+        if (!getPassword(operation, password)) {
+            std::cout << "=> Operation cancelled." << std::endl;
+            return;
+        }
     }
     else if (passwordSource == "k" || passwordSource == "key") {
         try {
@@ -495,7 +620,10 @@ static void processFile(const std::string& filename) {
     }
     else {
         std::cout << "Invalid choice. Using password mode." << std::endl;
-        password = getPassword(operation);
+        if (!getPassword(operation, password)) {
+            std::cout << "=> Operation cancelled." << std::endl;
+            return;
+        }
     }
 
     if (password.empty()) {
@@ -527,7 +655,7 @@ int main(int argc, char* argv[]) {
                 processFile(filename);
             }
             else {
-                std::cout << "File not found: " << filename << std::endl;
+                reportUnusableInput(filename);
             }
 
             std::cout << std::endl;
@@ -554,7 +682,7 @@ int main(int argc, char* argv[]) {
                         processFile(filename);
                     }
                     else {
-                        std::cout << "File not found: " << filename << std::endl;
+                        reportUnusableInput(filename);
                     }
                 }
                 else {
