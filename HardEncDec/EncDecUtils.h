@@ -28,6 +28,8 @@ bool isEncryptedFile(const std::string& filename);
 
 std::string getOutputFilename(const std::string& inputFilename, bool encrypt);
 std::string getInput(const std::string& prompt);
+bool readInputLine(std::string& out, const std::string& prompt, bool masked);
+bool inputClosed();
 std::string toLower(const std::string& str);
 std::string validateDecryptionFile(const std::string& filename);
 

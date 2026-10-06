@@ -7,12 +7,6 @@
 #include <openssl/err.h>
 #include <memory>
 #include <stdexcept>
-#ifdef _WIN32
-#include <conio.h>
-#else
-#include <termios.h>
-#include <unistd.h>
-#endif
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -23,76 +17,31 @@
 #include <ranges>
 #include <algorithm>
 
-// Returns the next keystroke, or -1 for "no character": end of input, or an extended
-// key such as an arrow whose scan code must never become password content.
-static int readKeyChar() {
-#ifdef _WIN32
-    int c = _getch();
-    if (c == 0 || c == 224) {
-        _getch();
-        return -1;
-    }
-    return c;
-#else
-    struct termios oldTerm, newTerm;
-    if (tcgetattr(STDIN_FILENO, &oldTerm) != 0) return -1;
-    newTerm = oldTerm;
-    newTerm.c_lflag &= ~(ICANON | ECHO);
-    newTerm.c_cc[VMIN] = 1;
-    newTerm.c_cc[VTIME] = 0;
-    if (tcsetattr(STDIN_FILENO, TCSANOW, &newTerm) != 0) return -1;
+// Zeroes itself on destruction, so the derived key and plaintext chunks do not
+// survive in freed heap when an error aborts the operation part way through.
+class SecretBuffer {
+public:
+    SecretBuffer() = default;
+    explicit SecretBuffer(size_t n) : data_(n) {}
 
-    unsigned char ch = 0;
-    ssize_t n = read(STDIN_FILENO, &ch, 1);
-    int result = -1;
-    if (n == 1) {
-        if (ch == 0x1B) {
-            // Arrows and function keys send ESC followed by more bytes; a timed read
-            // swallows the remainder so it cannot become password content.
-            newTerm.c_cc[VMIN] = 0;
-            newTerm.c_cc[VTIME] = 1;
-            if (tcsetattr(STDIN_FILENO, TCSANOW, &newTerm) == 0) {
-                char seq[8];
-                ssize_t got = read(STDIN_FILENO, seq, sizeof(seq));
-                (void)got;
-            }
+    ~SecretBuffer() {
+        if (!data_.empty()) {
+            OPENSSL_cleanse(data_.data(), data_.size());
         }
-        else if (ch == '\n') result = '\r';
-        else if (ch == 0x7F) result = 8;
-        else result = static_cast<unsigned char>(ch);
     }
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldTerm);
-    return result;
-#endif
-}
 
-// Reads one line with each character echoed as '*'. Returns false if input ends
-// before Enter, so callers can exit instead of looping on a closed stream.
-static bool readMaskedLine(std::string& out, const std::string& prompt) {
-    out.clear();
-    std::cout << prompt;
-    while (true) {
-        int ch = readKeyChar();
-        if (ch < 0) {
-            std::cout << std::endl;
-            return false;
-        }
-        if (ch == '\r') {
-            std::cout << std::endl;
-            return true;
-        }
-        if (ch == 8) {
-            if (!out.empty()) {
-                out.pop_back();
-                std::cout << "\b \b";
-            }
-        }
-        else if (ch >= 32 && ch < 127) {
-            out.push_back(static_cast<char>(ch));
-            std::cout << '*';
-        }
-    }
-}
+    unsigned char* data() { return data_.data(); }
+    const unsigned char* data() const { return data_.data(); }
+    size_t size() const { return data_.size(); }
+
+    SecretBuffer(const SecretBuffer&) = delete;
+    SecretBuffer& operator=(const SecretBuffer&) = delete;
+
+    SecretBuffer(SecretBuffer&& other) noexcept : data_(std::move(other.data_)) {}
+
+private:
+    std::vector<unsigned char> data_;
+};
 
 class SecureString {
 private:
@@ -115,7 +64,7 @@ public:
     }
 
     size_t size() const {
-        return data.size() - 1;
+        return data.empty() ? 0 : data.size() - 1;
     }
 
     bool empty() const {
@@ -151,8 +100,8 @@ static void handleOpenSSLError(const std::string& operation) {
     throw std::runtime_error(operation + " failed: " + std::string(errorBuf));
 }
 
-static std::vector<unsigned char> deriveKey(const SecureString& password, const std::vector<unsigned char>& salt) {
-    std::vector<unsigned char> key(AES_KEYLEN);
+static SecretBuffer deriveKey(const SecureString& password, const std::vector<unsigned char>& salt) {
+    SecretBuffer key(AES_KEYLEN);
 
     if (!PKCS5_PBKDF2_HMAC(password.c_str(), static_cast<int>(password.size()),
         salt.data(), static_cast<int>(salt.size()),
@@ -173,7 +122,7 @@ static bool getPassword(const std::string& operation, SecureString& password) {
     };
 
     while (true) {
-        if (!readMaskedLine(tempPassword, "=> Enter password for " + operation + ": ")) {
+        if (!readInputLine(tempPassword, "=> Enter password for " + operation + ": ", true)) {
             scrub();
             return false;
         }
@@ -184,7 +133,7 @@ static bool getPassword(const std::string& operation, SecureString& password) {
             continue;
         }
 
-        if (!readMaskedLine(confirmPassword, "=> Confirm password for " + operation + ": ")) {
+        if (!readInputLine(confirmPassword, "=> Confirm password for " + operation + ": ", true)) {
             scrub();
             return false;
         }
@@ -346,13 +295,13 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
     outputFile.write(reinterpret_cast<const char*>(iv.data()), AES_IVLEN);
 
     // Derive key from password
-    std::vector<unsigned char> key = deriveKey(password, salt);
+    SecretBuffer key = deriveKey(password, salt);
 
     // Initialize encryption context
     auto ctx = createCipherContext(EVP_aes_256_gcm(), key.data(), iv.data(), 1);
 
-    std::vector<unsigned char> buffer(BUFFER_SIZE);
-    std::vector<unsigned char> encryptedBuffer(BUFFER_SIZE + EVP_MAX_BLOCK_LENGTH);
+    SecretBuffer buffer(BUFFER_SIZE);
+    SecretBuffer encryptedBuffer(BUFFER_SIZE + EVP_MAX_BLOCK_LENGTH);
     std::streamsize totalRead = 0;
     int len;
 
@@ -383,11 +332,6 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
     outputFile.write(reinterpret_cast<const char*>(tag), TAG_SIZE);
 
     output.commit();
-
-    // Clean up sensitive data
-    OPENSSL_cleanse(key.data(), key.size());
-    OPENSSL_cleanse(buffer.data(), buffer.size());
-    OPENSSL_cleanse(encryptedBuffer.data(), encryptedBuffer.size());
 
     std::cout << "\n[DONE] Encryption successful!\n[DONE] File saved as: " << outputFilename << std::endl;
 }
@@ -454,7 +398,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     inputFile.seekg(sizeof(fileVersion) + SALT_SIZE + AES_IVLEN, std::ios::beg);
 
     // Derive key from password
-    std::vector<unsigned char> key = deriveKey(password, salt);
+    SecretBuffer key = deriveKey(password, salt);
 
     // Initialize decryption context
     auto ctx = createCipherContext(EVP_aes_256_gcm(), key.data(), iv.data(), 0);
@@ -462,8 +406,8 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     AtomicOutput output(outputFilename);
     std::ofstream& outputFile = output.stream();
 
-    std::vector<unsigned char> buffer(BUFFER_SIZE);
-    std::vector<unsigned char> decryptedBuffer(BUFFER_SIZE + EVP_MAX_BLOCK_LENGTH);
+    SecretBuffer buffer(BUFFER_SIZE);
+    SecretBuffer decryptedBuffer(BUFFER_SIZE + EVP_MAX_BLOCK_LENGTH);
     std::streamsize totalRead = 0;
     int len;
 
@@ -520,23 +464,8 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     // legitimately empty file rather than a failed decryption.
     const std::uintmax_t decryptedSize = output.commit();
 
-    // Clean up sensitive data
-    OPENSSL_cleanse(key.data(), key.size());
-    OPENSSL_cleanse(buffer.data(), buffer.size());
-    OPENSSL_cleanse(decryptedBuffer.data(), decryptedBuffer.size());
-
     std::cout << "\n[DONE] Decryption successful!\n[DONE] File saved as: " << outputFilename
         << " (" << decryptedSize << " bytes)" << std::endl;
-}
-
-static void initializeOpenSSL() {
-    OpenSSL_add_all_algorithms();
-    ERR_load_crypto_strings();
-}
-
-static void cleanupOpenSSL() {
-    EVP_cleanup();
-    ERR_free_strings();
 }
 
 static void showHeader() {
@@ -645,8 +574,6 @@ static void processFile(const std::string& filename) {
 }
 
 int main(int argc, char* argv[]) {
-    initializeOpenSSL();
-
     try {
         // If file is dropped on executable or provided as argument
         if (argc > 1) {
@@ -659,19 +586,21 @@ int main(int argc, char* argv[]) {
             }
 
             std::cout << std::endl;
-            std::string input = getInput("Press Enter to exit...");
+            std::string ignored;
+            readInputLine(ignored, "Press Enter to exit...", false);
             return 0;
         }
 
         // Interactive mode
         unsigned int option = showMenu();
 
-        while (option != 0) {
+        while (option != 0 && !inputClosed()) {
             try {
                 if (option == 1) {
                     showHeader();
                     std::string key = generateRandomPassword(64);
                     saveKey(key, "password.key");
+                    OPENSSL_cleanse(key.data(), key.size());
                     std::cout << "Key saved to password.key" << std::endl;
                     std::cout << "Store this file securely!" << std::endl << std::endl;
                 }
@@ -694,17 +623,18 @@ int main(int argc, char* argv[]) {
             }
 
             std::cout << std::endl;
-            std::string input = getInput("Press Enter to continue...");
+            std::string ignored;
+            if (!readInputLine(ignored, "Press Enter to continue...", false)) {
+                break;
+            }
             option = showMenu();
         }
     }
     catch (const std::exception& ex) {
         std::cerr << "Fatal Error: " << ex.what() << std::endl;
-        cleanupOpenSSL();
         return 1;
     }
 
-    cleanupOpenSSL();
     std::cout << "Goodbye!" << std::endl;
     return 0;
 }
