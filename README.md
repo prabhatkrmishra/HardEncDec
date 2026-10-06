@@ -65,51 +65,21 @@ Release x64 uses the static CRT (`MultiThreaded`).
 ### Linux
 
 There is no Makefile or CMake project — `HardEncDec.sln` is MSBuild-only — so build with
-the compiler directly. The sources also use two Windows-only APIs and rely on a
-transitive include, so three small edits are required first.
-
-**1. Install the dependencies:**
+the compiler directly. Console input is handled in `EncDecUtils.cpp`: `conio.h` and
+`_getch()` on Windows, `termios` on POSIX, behind `#ifdef _WIN32`, so the same sources
+build on both.
 
 ```sh
 sudo apt install build-essential libssl-dev
+g++ -std=c++20 -O2 HardEncDec/HardEncDec.cpp HardEncDec/EncDecUtils.cpp -lcrypto -o HardEncDec
 ```
 
-**2. Replace `<conio.h>` and `_getch()`.** `conio.h` does not exist on Linux. Swap the
-include at `HardEncDec.cpp:10` for a termios-based single-character read, and change both
-`_getch()` calls (lines 98 and 118) to `hardencdec_getch()`:
+Only `-lcrypto` is needed; the tool uses no TLS APIs. The build is warning-clean under
+`-Wall -Wextra`.
 
-```cpp
-#include <termios.h>
-#include <unistd.h>
+### Temporary files
 
-static char hardencdec_getch() {
-    struct termios oldt, newt;
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    char ch = 0;
-    ssize_t n = read(STDIN_FILENO, &ch, 1);
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-    if (n <= 0) return (char)13;
-    return ch == (char)10 ? (char)13 : ch;
-}
-```
-
-This keeps the masked password prompt working and still returns `\r` on Enter, which is
-what the existing loops compare against.
-
-**3. Change `system("cls")` to `system("clear")`** at `HardEncDec.cpp:437`.
-
-**4. Add `#include <algorithm>` to `EncDecUtils.cpp`.** `toLower()` calls
-`std::transform` without the include; MSVC supplies it transitively, g++ does not and
-fails with `'transform' is not a member of 'std'`.
-
-Then build:
-
-```sh
-g++ -std=c++20 -O2 HardEncDec.cpp EncDecUtils.cpp -lcrypto -o HardEncDec
-```
-
-Only `-lcrypto` is needed; the tool uses no TLS APIs. Expect one warning from
-`system("clear")` about an unused return value, which is harmless.
+Output is written to a randomly named scratch file beside the target and moved into place
+only once the AES-GCM tag verifies, so an existing file is never destroyed by a failed
+run or a wrong password. If the process is killed outright, a `*.hedtmp` file may be left
+behind; it is safe to delete.

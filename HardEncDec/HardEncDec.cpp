@@ -465,12 +465,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
 }
 
 static void showHeader() {
-#ifdef _WIN32
-    system("cls");
-#else
-    system("clear");
-#endif
-    std::cout << std::endl;
+    std::cout << "\033[2J\033[H" << std::flush;
     std::cout << "AES-256-GCM File Encryption/Decryption Tool" << std::endl;
     std::cout << "===========================================" << std::endl;
     std::cout << std::endl;

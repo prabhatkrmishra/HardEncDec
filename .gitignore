@@ -1,3 +1,7 @@
 .vs
 x64
-HardEncDec\\x64
+build/
+*.hedtmp
+
+# the tool writes a plaintext key to the working directory
+password.key

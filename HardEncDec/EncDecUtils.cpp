@@ -251,13 +251,6 @@ std::string getInput(const std::string& prompt) {
     return input;
 }
 
-std::string validateDecryptionFile(const std::string& filename) {
-    if (filename.size() > 4 && filename.substr(filename.size() - 4) == ".enc") {
-        return filename.substr(0, filename.size() - 4);
-    }
-    throw std::runtime_error("Invalid file for decryption. Encrypted file must end in .enc");
-}
-
 std::string toLower(const std::string& str) {
     std::string result = str;
     std::transform(result.begin(), result.end(), result.begin(),
@@ -284,7 +277,11 @@ void showProgress(std::streamsize current, std::streamsize total, const std::str
     if (total <= 0) return;
 
     const int barWidth = 50;
-    double ratio = static_cast<double>(current) / total;
+    double ratio = static_cast<double>(current) / static_cast<double>(total);
+    // A file that grew while we were reading it pushes the ratio past 1, which would
+    // put the cursor outside the bar and leave it with nothing to draw.
+    if (ratio < 0.0) ratio = 0.0;
+    if (ratio > 1.0) ratio = 1.0;
     int pos = static_cast<int>(barWidth * ratio);
     int percentage = static_cast<int>(ratio * 100);
 
@@ -318,27 +315,4 @@ void showProgress(std::streamsize current, std::streamsize total, const std::str
     std::cout.flush();
 
     if (current >= total) std::cout << std::endl;
-}
-
-void analyzeEncryptedFile(const std::string& filename) {
-    std::ifstream file(filename, std::ios::binary);
-    if (!file) {
-        std::cout << "Cannot open file for analysis: " << filename << std::endl;
-        return;
-    }
-
-    file.seekg(0, std::ios::end);
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-
-    uint8_t version;
-    file.read(reinterpret_cast<char*>(&version), sizeof(version));
-
-    std::cout << "File Analysis:" << std::endl;
-    std::cout << "Total size: " << size << " bytes" << std::endl;
-    std::cout << "Version: " << static_cast<int>(version) << std::endl;
-    std::cout << "Expected header size: " << (sizeof(version) + SALT_SIZE + AES_IVLEN + TAG_SIZE) << " bytes" << std::endl;
-    std::cout << "Expected data size: " << (size - (sizeof(version) + SALT_SIZE + AES_IVLEN + TAG_SIZE)) << " bytes" << std::endl;
-
-    file.close();
 }
