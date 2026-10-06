@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <random>
 #ifdef _WIN32
@@ -111,42 +112,40 @@ bool askOverwrite(const std::string& filename) {
     return true;
 }
 
-bool isValidEncryptedFile(const std::string& filename) {
-    if (!fileExists(filename)) return false;
+// Smallest file that can be a valid encrypted file: version + salt + iv + tag.
+static const std::streamsize MIN_ENCRYPTED_SIZE = sizeof(uint8_t) + SALT_SIZE + AES_IVLEN + TAG_SIZE;
 
+// Reads the leading version byte, or -1 if the file is missing or too short.
+static int readFileVersion(const std::string& filename) {
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
-    if (!file) return false;
+    if (!file) return -1;
 
     std::streamsize size = file.tellg();
-    file.close();
+    if (size < MIN_ENCRYPTED_SIZE) return -1;
 
-    // Check if file has minimum required size: version + salt + iv + tag
-    const std::streamsize MIN_ENCRYPTED_SIZE = sizeof(uint8_t) + SALT_SIZE + AES_IVLEN + TAG_SIZE;
-    if (size < MIN_ENCRYPTED_SIZE) {
-        std::cerr << "File too small: " << size << " bytes (minimum " << MIN_ENCRYPTED_SIZE << " bytes required)" << std::endl;
-        return false;
-    }
-
-    // Additional check: read version byte
-    file.open(filename, std::ios::binary);
-    if (!file) return false;
-
-    uint8_t version;
+    file.seekg(0, std::ios::beg);
+    uint8_t version = 0;
     file.read(reinterpret_cast<char*>(&version), sizeof(version));
-    file.close();
+    if (file.gcount() != static_cast<std::streamsize>(sizeof(version))) return -1;
+    return static_cast<int>(version);
+}
 
-    // Only the current format is readable. Files from older releases cannot be
-    // decrypted because the header does not record the PBKDF2 iteration count
-    // that derived their key.
-    if (version != FILE_VERSION) {
-        std::cerr << "Unsupported file version: " << static_cast<int>(version)
-            << " (supported version: " << static_cast<int>(FILE_VERSION) << ")"
-            << "\nPlease use the older release V" << static_cast<int>(version)
+bool isValidEncryptedFile(const std::string& filename) {
+    return readFileVersion(filename) == FILE_VERSION;
+}
+
+// Only the current format is readable. Files from older releases cannot be decrypted
+// because the header does not record the PBKDF2 iteration count that derived the key.
+void explainUnsupportedVersion(int version) {
+    std::cout << "Unsupported file version: " << version
+        << " (supported version: " << static_cast<int>(FILE_VERSION) << ")" << std::endl;
+    if (version > 0 && version < FILE_VERSION) {
+        std::cout << "Please use the older release V" << version
             << ".0 of this tool to decrypt it." << std::endl;
-        return false;
     }
-
-    return true;
+    else {
+        std::cout << "This does not look like a file encrypted by this tool." << std::endl;
+    }
 }
 
 bool isEncryptedFile(const std::string& filename) {
@@ -261,7 +260,8 @@ std::string validateDecryptionFile(const std::string& filename) {
 
 std::string toLower(const std::string& str) {
     std::string result = str;
-    std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+    std::transform(result.begin(), result.end(), result.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return result;
 }
 

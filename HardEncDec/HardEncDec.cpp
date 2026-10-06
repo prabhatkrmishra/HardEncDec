@@ -337,10 +337,6 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
 }
 
 static void aesDecryptFile(const std::string& inputFilename, const std::string& outputFilename, const SecureString& password) {
-    if (!isValidEncryptedFile(inputFilename)) {
-        throw std::runtime_error("[ERROR] Invalid or corrupted encrypted file: " + inputFilename);
-    }
-
     std::ifstream inputFile(inputFilename, std::ios::binary);
     if (!inputFile) {
         throw std::runtime_error("[ERROR] Could not open input file: " + inputFilename);
@@ -357,8 +353,8 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     // decrypted because the header does not record the PBKDF2 iteration count
     // that derived their key.
     if (fileVersion != FILE_VERSION) {
-        throw std::runtime_error("[ERROR] Unsupported file version: " + std::to_string(fileVersion) +
-            " (expected " + std::to_string(FILE_VERSION) + ")");
+        explainUnsupportedVersion(fileVersion);
+        throw std::runtime_error("[ERROR] Cannot decrypt " + inputFilename);
     }
 
     // Read salt
@@ -509,7 +505,17 @@ static void reportUnusableInput(const std::string& filename) {
 }
 
 static void processFile(const std::string& filename) {
-    bool encrypt = !isEncryptedFile(filename);
+    const bool encrypt = !isEncryptedFile(filename);
+
+    // A file whose header already reads as encrypted should not be encrypted a second
+    // time just because it was renamed. Encryption is not reversible on its own, so
+    // doing it anyway quietly buries the original.
+    if (encrypt && isValidEncryptedFile(filename)) {
+        std::cout << "This file is already encrypted but does not end in .enc." << std::endl;
+        std::cout << "Rename it to end in .enc and run this again to decrypt it." << std::endl;
+        return;
+    }
+
     std::string operation = encrypt ? "Encryption" : "Decryption";
     std::string outputFilename = getOutputFilename(filename, encrypt);
 
@@ -539,7 +545,7 @@ static void processFile(const std::string& filename) {
         try {
             std::string key = readKey("password.key");
             password.assign(key);
-            OPENSSL_cleanse(const_cast<char*>(key.data()), key.size());
+            OPENSSL_cleanse(key.data(), key.size());
         }
         catch (const std::exception& e) {
             std::cout << "Error reading key file: " << e.what() << std::endl;

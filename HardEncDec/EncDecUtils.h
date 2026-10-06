@@ -3,7 +3,9 @@
 #ifndef ENCDEC_UTILS_H
 #define ENCDEC_UTILS_H
 
-#include <cstring>
+#include <cstdint>
+#include <iosfwd>
+#include <string>
 
 // Encryption constants
 const int PBKDF2_ITERATIONS = 100000000; // 100 million iterations
@@ -24,6 +26,7 @@ std::string readKey(const std::string& filename = "password.key");
 bool fileExists(const std::string& filename);
 bool askOverwrite(const std::string& filename);
 bool isValidEncryptedFile(const std::string& filename);
+void explainUnsupportedVersion(int version);
 bool isEncryptedFile(const std::string& filename);
 
 std::string getOutputFilename(const std::string& inputFilename, bool encrypt);
