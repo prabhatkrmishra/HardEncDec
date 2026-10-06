@@ -247,6 +247,11 @@ bool readInputLine(std::string& out, const std::string& prompt, bool masked) {
     }
 }
 
+// One keypress, no Enter. Used by the menu so choosing an option acts immediately.
+int readImmediateKey() {
+    return readKeyChar();
+}
+
 std::string getInput(const std::string& prompt) {
     std::string input;
     readInputLine(input, prompt, false);
