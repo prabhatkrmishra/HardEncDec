@@ -465,19 +465,15 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
         << " (" << decryptedSize << " bytes)" << std::endl;
 }
 
-static void showHeader(bool clearScreen) {
-    // Only wipe the screen on the way in. Redrawing the menu over the top of a
-    // finished operation would hide the result the user just asked for.
-    if (clearScreen) {
-        std::cout << "\033[2J\033[H" << std::flush;
-    }
+static void showHeader() {
+    std::cout << "\033[2J\033[H" << std::flush;
     std::cout << "AES-256-GCM File Encryption/Decryption Tool" << std::endl;
     std::cout << "===========================================" << std::endl;
     std::cout << std::endl;
 }
 
-static unsigned int showMenu(bool clearScreen) {
-    showHeader(clearScreen);
+static unsigned int showMenu() {
+    showHeader();
     std::cout << "1. Generate password key" << std::endl;
     std::cout << "2. Encrypt/Decrypt a file" << std::endl;
     std::cout << "0. Exit" << std::endl;
@@ -538,7 +534,7 @@ static void processFile(const std::string& filename) {
     std::string operation = encrypt ? "Encryption" : "Decryption";
     std::string outputFilename = getOutputFilename(filename, encrypt);
 
-    showHeader(false);
+    showHeader();
     std::cout << "=> [INPUT FILE]: " << filename << std::endl;
     std::cout << "=> [OPERATION]: " << operation << std::endl;
     std::cout << "=> [OUTPUT FILE]: " << outputFilename << std::endl;
@@ -621,12 +617,12 @@ int main(int argc, char* argv[]) {
         }
 
         // Interactive mode
-        unsigned int option = showMenu(true);
+        unsigned int option = showMenu();
 
         while (option != 0 && !inputClosed()) {
             try {
                 if (option == 1) {
-                    showHeader(false);
+                    showHeader();
                     std::string key = generateRandomPassword(64);
                     saveKey(key, "password.key");
                     OPENSSL_cleanse(key.data(), key.size());
@@ -634,7 +630,7 @@ int main(int argc, char* argv[]) {
                     std::cout << "Store this file securely!" << std::endl << std::endl;
                 }
                 else if (option == 2) {
-                    showHeader(false);
+                    showHeader();
                     std::string filename = getInput("Enter file path: ");
                     if (fileExists(filename)) {
                         processFile(filename);
@@ -651,7 +647,7 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: " << ex.what() << std::endl;
             }
 
-            option = showMenu(false);
+            option = showMenu();
         }
     }
     catch (const std::exception& ex) {
