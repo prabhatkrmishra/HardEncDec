@@ -219,7 +219,9 @@ bool inputClosed() {
 // input meant for the raw reader.
 bool readInputLine(std::string& out, const std::string& prompt, bool masked) {
     out.clear();
-    std::cout << prompt;
+    // The prompt has no newline, and the next thing we do is switch the terminal into
+    // raw mode where nothing flushes for us, so it has to go out before we read.
+    std::cout << prompt << std::flush;
     while (true) {
         int ch = readKeyChar();
         if (ch < 0) {
