@@ -12,6 +12,8 @@ const int AES_IVLEN = 12;
 const int SALT_SIZE = 16;
 const int TAG_SIZE = 16;
 const size_t BUFFER_SIZE = 512 * 1024; // 512KB
+// Only files written with this exact version can be decrypted. Bump this only for
+// an incompatible format change; earlier files stay unreadable afterwards.
 const uint8_t FILE_VERSION = 3;
 
 std::string generateRandomPassword(size_t length = 64);

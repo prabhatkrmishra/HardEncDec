@@ -8,6 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <conio.h>
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 
@@ -243,6 +244,32 @@ static void aesEncryptFile(const std::string& inputFilename, const std::string& 
     std::cout << "\n[DONE] Encryption successful!\n[DONE] File saved as: " << outputFilename << std::endl;
 }
 
+// GCM authenticates only after the final block, so a wrong password or a tampered
+// file leaves unauthenticated bytes on disk before the tag check runs. This removes
+// the partial output on any failure rather than leaving a corrupt file behind.
+class OutputFileGuard {
+public:
+    OutputFileGuard(const std::string& path, std::ofstream& stream)
+        : path_(path), stream_(stream) {}
+
+    ~OutputFileGuard() {
+        if (!committed_) {
+            stream_.close();
+            std::remove(path_.c_str());
+        }
+    }
+
+    void commit() { committed_ = true; }
+
+    OutputFileGuard(const OutputFileGuard&) = delete;
+    OutputFileGuard& operator=(const OutputFileGuard&) = delete;
+
+private:
+    const std::string& path_;
+    std::ofstream& stream_;
+    bool committed_ = false;
+};
+
 static void aesDecryptFile(const std::string& inputFilename, const std::string& outputFilename, const SecureString& password) {
     if (!isValidEncryptedFile(inputFilename)) {
         throw std::runtime_error("[ERROR] Invalid or corrupted encrypted file: " + inputFilename);
@@ -260,10 +287,12 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
         throw std::runtime_error("[ERROR] Failed to read file version");
     }
 
-    // Support both version 1 and 2 for backward compatibility
-    if (fileVersion != 1 && fileVersion != FILE_VERSION) {
+    // Only the current format is readable. Files from older releases cannot be
+    // decrypted because the header does not record the PBKDF2 iteration count
+    // that derived their key.
+    if (fileVersion != FILE_VERSION) {
         throw std::runtime_error("[ERROR] Unsupported file version: " + std::to_string(fileVersion) +
-            " (expected 1 or " + std::to_string(FILE_VERSION) + ")");
+            " (expected " + std::to_string(FILE_VERSION) + ")");
     }
 
     // Read salt
@@ -309,6 +338,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     if (!outputFile) {
         throw std::runtime_error("[ERROR] Could not open output file: " + outputFilename);
     }
+    OutputFileGuard outputGuard(outputFilename, outputFile);
 
     std::vector<unsigned char> buffer(BUFFER_SIZE);
     std::vector<unsigned char> decryptedBuffer(BUFFER_SIZE + EVP_MAX_BLOCK_LENGTH);
@@ -382,6 +412,7 @@ static void aesDecryptFile(const std::string& inputFilename, const std::string& 
     if (decryptedSize == 0) {
         throw std::runtime_error("[ERROR] Decrypted file is empty - decryption may have failed");
     }
+    outputGuard.commit();
 
     // Clean up sensitive data
     OPENSSL_cleanse(key.data(), key.size());

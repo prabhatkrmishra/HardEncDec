@@ -97,11 +97,14 @@ bool isValidEncryptedFile(const std::string& filename) {
     file.read(reinterpret_cast<char*>(&version), sizeof(version));
     file.close();
 
-    // Support both version 1 and 2
-    if (version != 1 && version != FILE_VERSION) {
+    // Only the current format is readable. Files from older releases cannot be
+    // decrypted because the header does not record the PBKDF2 iteration count
+    // that derived their key.
+    if (version != FILE_VERSION) {
         std::cerr << "Unsupported file version: " << static_cast<int>(version)
             << " (supported version: " << static_cast<int>(FILE_VERSION) << ")"
-            << "\nPlease use older version: V" << static_cast<int>(version) << ".0" << std::endl;
+            << "\nPlease use the older release V" << static_cast<int>(version)
+            << ".0 of this tool to decrypt it." << std::endl;
         return false;
     }
 
